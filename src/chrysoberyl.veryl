@@ -1,4 +1,4 @@
-/// Chrysoberyl is a compact, in-order RV32I processor ported from Alexandrite.
+/// Chrysoberyl is a compact, in-order RV32IC processor ported from Alexandrite.
 ///
 /// The core has the same Harvard-style instruction/data memory interface as
 /// Alexandrite.  Both memories are combinational-read; writes are committed by
@@ -20,7 +20,11 @@ pub module Chrysoberyl (
     var r_pc     : logic<12>     ;
     var r_id_inst: logic<32>     ;
     var r_id_pc  : logic<12>     ;
+    var r_id_len : logic<3>      ;
     var r_finish : logic         ;
+    var r_fetch_cross: logic     ;
+    var r_fetch_low16: logic<16> ;
+    var r_fetch_pc: logic<12>    ;
 
     // ID/EX pipeline register.
     var r_ex_valid       : logic    ;
@@ -80,6 +84,13 @@ pub module Chrysoberyl (
     var w_wb_data     : logic<32>;
     var w_shifted_data: logic<32>;
     var w_load_stall  : logic    ;
+    var w_fetch_inst  : logic<32>;
+    var w_fetch_legal : logic    ;
+    var w_fetch_len   : logic<3> ;
+    var w_fetch_half  : logic<16>;
+    var w_fetch_word  : logic<32>;
+    var w_c_imm       : logic<32>;
+    var w_c_rd        : logic<5> ;
 
     always_comb {
         // Memory stage and external RAM port.
@@ -171,6 +182,164 @@ pub module Chrysoberyl (
             default: w_ex_branch_ok = false;
         }
         w_ex_jump = r_ex_valid && ((r_ex_branch != 0 && w_ex_branch_ok) || r_ex_wb_sel == 2'd2);
+
+        // Fetch one instruction from the 32-bit ROM port. Compressed
+        // instructions are expanded to their RV32I equivalents before decode.
+        // A 32-bit instruction beginning at address 2 mod 4 takes a second
+        // fetch cycle so its two halves can be joined.
+        w_fetch_word  = i_rom_data;
+        w_fetch_half  = i_rom_data[15:0];
+        w_fetch_inst  = i_rom_data;
+        w_fetch_legal = true;
+        w_fetch_len   = 4;
+        w_c_imm       = 0;
+        w_c_rd        = 0;
+        if r_fetch_cross {
+            w_fetch_word = {i_rom_data[15:0], r_fetch_low16};
+            w_fetch_inst = w_fetch_word;
+        } else {
+            if r_pc[1] {
+                w_fetch_half = i_rom_data[31:16];
+            }
+            if w_fetch_half[1:0] != 2'b11 {
+                w_fetch_len  = 2;
+                w_fetch_inst = 0;
+                case w_fetch_half[1:0] {
+                    2'b00: case w_fetch_half[15:13] {
+                        // C.ADDI4SPN
+                        3'b000: {
+                            w_c_rd  = {2'b01, w_fetch_half[4:2]};
+                            w_c_imm = {22'b0, w_fetch_half[10:7], w_fetch_half[12:11], w_fetch_half[5], w_fetch_half[6], 2'b0};
+                            w_fetch_inst = {w_c_imm[11:0], 5'd2, 3'b000, w_c_rd, 7'b0010011};
+                            if w_c_imm == 0 { w_fetch_legal = false; }
+                        }
+                        // C.LW
+                        3'b010: {
+                            w_c_rd  = {2'b01, w_fetch_half[4:2]};
+                            w_c_imm = {25'b0, w_fetch_half[5], w_fetch_half[12:10], w_fetch_half[6], 2'b0};
+                            w_fetch_inst = {w_c_imm[11:0], {2'b01, w_fetch_half[9:7]}, 3'b010, w_c_rd, 7'b0000011};
+                        }
+                        // C.SW
+                        3'b110: {
+                            w_c_imm = {25'b0, w_fetch_half[5], w_fetch_half[12:10], w_fetch_half[6], 2'b0};
+                            w_fetch_inst = {w_c_imm[11:5], {2'b01, w_fetch_half[4:2]}, {2'b01, w_fetch_half[9:7]}, 3'b010, w_c_imm[4:0], 7'b0100011};
+                        }
+                        default: w_fetch_legal = false;
+                    }
+                    2'b01: case w_fetch_half[15:13] {
+                        // C.ADDI / C.NOP
+                        3'b000: {
+                            w_c_imm = {w_fetch_half[12] repeat 27, w_fetch_half[6:2]};
+                            w_fetch_inst = {w_c_imm[11:0], w_fetch_half[11:7], 3'b000, w_fetch_half[11:7], 7'b0010011};
+                        }
+                        // C.JAL (RV32 only)
+                        3'b001: {
+                            w_c_imm = {w_fetch_half[12] repeat 21, w_fetch_half[8], w_fetch_half[10:9], w_fetch_half[6], w_fetch_half[7], w_fetch_half[2], w_fetch_half[11], w_fetch_half[5:3], 1'b0};
+                            w_fetch_inst = {w_c_imm[20], w_c_imm[10:1], w_c_imm[11], w_c_imm[19:12], 5'd1, 7'b1101111};
+                        }
+                        // C.LI
+                        3'b010: {
+                            w_c_imm = {w_fetch_half[12] repeat 27, w_fetch_half[6:2]};
+                            w_fetch_inst = {w_c_imm[11:0], 5'd0, 3'b000, w_fetch_half[11:7], 7'b0010011};
+                            if w_fetch_half[11:7] == 0 { w_fetch_legal = false; }
+                        }
+                        // C.ADDI16SP / C.LUI
+                        3'b011: {
+                            if w_fetch_half[11:7] == 5'd2 {
+                                w_c_imm = {w_fetch_half[12] repeat 23, w_fetch_half[4:3], w_fetch_half[5], w_fetch_half[2], w_fetch_half[6], 4'b0};
+                                w_fetch_inst = {w_c_imm[11:0], 5'd2, 3'b000, 5'd2, 7'b0010011};
+                                if w_c_imm == 0 { w_fetch_legal = false; }
+                            } else {
+                                w_c_imm = {w_fetch_half[12] repeat 15, w_fetch_half[6:2], 12'b0};
+                                w_fetch_inst = {w_c_imm[31:12], w_fetch_half[11:7], 7'b0110111};
+                                if w_fetch_half[11:7] == 0 || w_c_imm == 0 { w_fetch_legal = false; }
+                            }
+                        }
+                        // C.SRLI/C.SRAI/C.ANDI/C.SUB/XOR/OR/AND
+                        3'b100: {
+                            w_c_rd = {2'b01, w_fetch_half[9:7]};
+                            case w_fetch_half[11:10] {
+                                2'b00: {
+                                    w_fetch_inst = {7'b0000000, w_fetch_half[6:2], w_c_rd, 3'b101, w_c_rd, 7'b0010011};
+                                    if w_fetch_half[12] { w_fetch_legal = false; }
+                                }
+                                2'b01: {
+                                    w_fetch_inst = {7'b0100000, w_fetch_half[6:2], w_c_rd, 3'b101, w_c_rd, 7'b0010011};
+                                    if w_fetch_half[12] { w_fetch_legal = false; }
+                                }
+                                2'b10: {
+                                    w_c_imm = {w_fetch_half[12] repeat 27, w_fetch_half[6:2]};
+                                    w_fetch_inst = {w_c_imm[11:0], w_c_rd, 3'b111, w_c_rd, 7'b0010011};
+                                }
+                                default: {
+                                    case w_fetch_half[6:5] {
+                                        2'b00: w_fetch_inst = {7'b0100000, {2'b01, w_fetch_half[4:2]}, w_c_rd, 3'b000, w_c_rd, 7'b0110011};
+                                        2'b01: w_fetch_inst = {7'b0000000, {2'b01, w_fetch_half[4:2]}, w_c_rd, 3'b100, w_c_rd, 7'b0110011};
+                                        2'b10: w_fetch_inst = {7'b0000000, {2'b01, w_fetch_half[4:2]}, w_c_rd, 3'b110, w_c_rd, 7'b0110011};
+                                        2'b11: w_fetch_inst = {7'b0000000, {2'b01, w_fetch_half[4:2]}, w_c_rd, 3'b111, w_c_rd, 7'b0110011};
+                                    }
+                                    if w_fetch_half[12] { w_fetch_legal = false; }
+                                }
+                            }
+                        }
+                        // C.J
+                        3'b101: {
+                            w_c_imm = {w_fetch_half[12] repeat 21, w_fetch_half[8], w_fetch_half[10:9], w_fetch_half[6], w_fetch_half[7], w_fetch_half[2], w_fetch_half[11], w_fetch_half[5:3], 1'b0};
+                            w_fetch_inst = {w_c_imm[20], w_c_imm[10:1], w_c_imm[11], w_c_imm[19:12], 5'd0, 7'b1101111};
+                        }
+                        // C.BEQZ / C.BNEZ
+                        3'b110, 3'b111: {
+                            w_c_imm = {w_fetch_half[12] repeat 24, w_fetch_half[6:5], w_fetch_half[2], w_fetch_half[11:10], w_fetch_half[4:3], 1'b0};
+                            w_fetch_inst = {w_c_imm[12], w_c_imm[10:5], 5'd0, {2'b01, w_fetch_half[9:7]}, {2'b00, w_fetch_half[13]}, w_c_imm[4:1], w_c_imm[11], 7'b1100011};
+                        }
+                    }
+                    2'b10: case w_fetch_half[15:13] {
+                        // C.SLLI
+                        3'b000: {
+                            w_fetch_inst = {7'b0000000, w_fetch_half[6:2], w_fetch_half[11:7], 3'b001, w_fetch_half[11:7], 7'b0010011};
+                            if w_fetch_half[12] || w_fetch_half[11:7] == 0 { w_fetch_legal = false; }
+                        }
+                        // C.LWSP
+                        3'b010: {
+                            w_c_imm = {24'b0, w_fetch_half[3:2], w_fetch_half[12], w_fetch_half[6:4], 2'b0};
+                            w_fetch_inst = {w_c_imm[11:0], 5'd2, 3'b010, w_fetch_half[11:7], 7'b0000011};
+                            if w_fetch_half[11:7] == 0 { w_fetch_legal = false; }
+                        }
+                        // C.JR/C.MV/C.EBREAK/C.JALR/C.ADD
+                        3'b100: {
+                            if !w_fetch_half[12] {
+                                if w_fetch_half[6:2] == 0 {
+                                    w_fetch_inst = {12'b0, w_fetch_half[11:7], 3'b000, 5'd0, 7'b1100111};
+                                    if w_fetch_half[11:7] == 0 { w_fetch_legal = false; }
+                                } else {
+                                    w_fetch_inst = {7'b0000000, w_fetch_half[6:2], 5'd0, 3'b000, w_fetch_half[11:7], 7'b0110011};
+                                    if w_fetch_half[11:7] == 0 { w_fetch_legal = false; }
+                                }
+                            } else {
+                                if w_fetch_half[6:2] == 0 {
+                                    if w_fetch_half[11:7] == 0 {
+                                        w_fetch_legal = false;
+                                    } else {
+                                        w_fetch_inst = {12'b0, w_fetch_half[11:7], 3'b000, 5'd1, 7'b1100111};
+                                    }
+                                } else {
+                                    w_fetch_inst = {7'b0000000, w_fetch_half[6:2], w_fetch_half[11:7], 3'b000, w_fetch_half[11:7], 7'b0110011};
+                                    if w_fetch_half[11:7] == 0 { w_fetch_legal = false; }
+                                }
+                            }
+                        }
+                        // C.SWSP
+                        3'b110: {
+                            w_c_imm = {24'b0, w_fetch_half[8:7], w_fetch_half[12:9], 2'b0};
+                            w_fetch_inst = {w_c_imm[11:5], w_fetch_half[6:2], 5'd2, 3'b010, w_c_imm[4:0], 7'b0100011};
+                        }
+                        default: w_fetch_legal = false;
+                    }
+                    default: w_fetch_legal = false;
+                }
+            }
+        }
+        if !w_fetch_legal { w_fetch_inst = 0; }
 
         // Decode defaults.
         d_valid        = true;
@@ -350,10 +519,12 @@ pub module Chrysoberyl (
                 d_b = w_ex_alu;
             }
         }
-        if d_uses_rs1 && r_mem_valid && r_mem_reg_write && r_mem_rd != 0 && d_rs1 == r_mem_rd {
+        if d_uses_rs1 && r_mem_valid && r_mem_reg_write && r_mem_rd != 0 && d_rs1 == r_mem_rd
+            && !(r_ex_valid && r_ex_reg_write && !r_ex_mem_read && r_ex_rd != 0 && d_rs1 == r_ex_rd) {
             d_a = w_wb_data;
         }
-        if d_uses_rs2 && r_mem_valid && r_mem_reg_write && r_mem_rd != 0 && d_rs2 == r_mem_rd {
+        if d_uses_rs2 && r_mem_valid && r_mem_reg_write && r_mem_rd != 0 && d_rs2 == r_mem_rd
+            && !(r_ex_valid && r_ex_reg_write && !r_ex_mem_read && r_ex_rd != 0 && d_rs2 == r_ex_rd) {
             d_store_data = w_wb_data;
             if r_id_inst[6:0] == 7'b0110011 || r_id_inst[6:0] == 7'b1100011 {
                 d_b = w_wb_data;
@@ -376,7 +547,11 @@ pub module Chrysoberyl (
             r_pc              = 0;
             r_id_inst         = 0;
             r_id_pc           = 0;
+            r_id_len          = 4;
             r_finish          = false;
+            r_fetch_cross     = false;
+            r_fetch_low16     = 0;
+            r_fetch_pc        = 0;
             r_ex_valid        = false;
             r_mem_valid       = false;
             r_ex_a            = 0;
@@ -429,13 +604,12 @@ pub module Chrysoberyl (
                 r_pc       = r_ex_jump_addr[11:0];
                 r_id_inst  = 0;
                 r_id_pc    = 0;
+                r_id_len   = 4;
+                r_fetch_cross = false;
                 r_ex_valid = false;
             } else if w_load_stall {
                 r_ex_valid = false;
             } else {
-                r_id_inst         = i_rom_data;
-                r_id_pc           = r_pc;
-                r_pc              = r_pc + 4;
                 r_ex_valid        = d_valid;
                 r_ex_a            = d_a;
                 r_ex_b            = d_b;
@@ -449,8 +623,28 @@ pub module Chrysoberyl (
                 r_ex_mem_unsigned = d_mem_unsigned;
                 r_ex_reg_write    = d_reg_write;
                 r_ex_wb_sel       = d_wb_sel;
-                r_ex_pc4          = {20'b0, r_id_pc} + 4;
+                r_ex_pc4          = {20'b0, r_id_pc} + r_id_len;
                 r_ex_jump_addr    = d_jump_addr;
+                if r_fetch_cross {
+                    r_id_inst     = w_fetch_inst;
+                    r_id_pc       = r_fetch_pc;
+                    r_id_len      = 4;
+                    r_pc          = r_pc + 2;
+                    r_fetch_cross = false;
+                } else if r_pc[1] && w_fetch_half[1:0] == 2'b11 {
+                    r_id_inst      = 0;
+                    r_id_pc        = 0;
+                    r_id_len       = 4;
+                    r_fetch_low16  = w_fetch_half;
+                    r_fetch_pc     = r_pc;
+                    r_fetch_cross  = true;
+                    r_pc           = r_pc + 2;
+                } else {
+                    r_id_inst = w_fetch_inst;
+                    r_id_pc   = r_pc;
+                    r_id_len  = w_fetch_len;
+                    r_pc      = r_pc + w_fetch_len;
+                }
             }
         }
     }
