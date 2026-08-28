@@ -2,14 +2,14 @@ module rv32i_tb;
     logic clk = 0;
     logic rst = 1;
     logic [31:0] rom_data;
-    logic [9:0] rom_addr;
+    logic [11:0] rom_addr;
     logic [31:0] ram_read_data;
     logic [9:0] ram_addr;
     logic [31:0] ram_write_data;
     logic [3:0] ram_we;
     logic finish;
     logic [31:0] x [32];
-    logic [31:0] rom [0:1023];
+    logic [31:0] rom [0:4095];
     logic [31:0] ram [0:1023];
 
     chrysoberyl_Chrysoberyl dut (
@@ -48,6 +48,7 @@ module rv32i_tb;
 
     initial begin
         for (int n = 0; n < 1024; n++) begin rom[n] = 32'h00000013; ram[n] = 0; end
+        for (int n = 1024; n < 4096; n++) rom[n] = 32'h00000013;
         rom[ 0] = i_type(5,  0, 3'b000,  1, 7'b0010011); // addi x1, x0, 5
         rom[ 1] = i_type(-3, 0, 3'b000,  2, 7'b0010011); // addi x2, x0, -3
         rom[ 2] = r_type(0, 1, 1, 3'b000,  3);           // add x3, x1, x1

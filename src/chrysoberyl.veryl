@@ -3,11 +3,14 @@
 /// The core has the same Harvard-style instruction/data memory interface as
 /// Alexandrite.  Both memories are combinational-read; writes are committed by
 /// the environment on `i_clk` when `o_ram_we` is asserted.
-pub module Chrysoberyl (
+pub module Chrysoberyl #(
+    param USE_HISTORY_PREDICTION: bbool = false,
+    param ROM_SIZE_BYTES        : u32   = 16384,
+) (
     i_clk           : input  clock         ,
     i_rst           : input  reset         ,
     i_rom_data      : input  logic<32>     ,
-    o_rom_addr      : output logic<10>     ,
+    o_rom_addr      : output logic<$clog2(ROM_SIZE_BYTES) - 2>,
     i_ram_read_data : input  logic<32>     ,
     o_ram_addr      : output logic<10>     ,
     o_ram_write_data: output logic<32>     ,
@@ -15,17 +18,20 @@ pub module Chrysoberyl (
     o_finish        : output logic         ,
     o_x             : output logic<32> [32],
 ) {
+    const ROM_ADDRESS_WIDTH: u32 = $clog2(ROM_SIZE_BYTES);
+
     // Architectural state and IF/ID pipeline register.
     var r_x      : logic<32> [32];
-    var r_pc     : logic<12>     ;
+    var r_pc     : logic<ROM_ADDRESS_WIDTH>;
     var r_id_inst: logic<32>     ;
-    var r_id_pc  : logic<12>     ;
+    var r_id_pc  : logic<ROM_ADDRESS_WIDTH>;
     var r_id_len : logic<3>      ;
     var r_id_pred_taken: logic   ;
+    var r_id_bht_index : logic<6>;
     var r_finish : logic         ;
     var r_fetch_cross: logic     ;
     var r_fetch_low16: logic<16> ;
-    var r_fetch_pc: logic<12>    ;
+    var r_fetch_pc: logic<ROM_ADDRESS_WIDTH>;
 
     // ID/EX pipeline register.
     var r_ex_valid       : logic    ;
@@ -44,6 +50,7 @@ pub module Chrysoberyl (
     var r_ex_pc4         : logic<32>;
     var r_ex_jump_addr   : logic<32>;
     var r_ex_pred_taken  : logic    ;
+    var r_ex_bht_index   : logic<6> ;
 
     // EX/MEM pipeline register.
     var r_mem_valid     : logic    ;
@@ -101,10 +108,12 @@ pub module Chrysoberyl (
     var w_fetch_target: logic<32>;
     var w_fetch_pred_taken: logic;
     var w_fetch_ctrl_imm: logic<32>;
+    var w_fetch_bht_index: logic<6>;
+    var w_history_pred_taken: logic;
 
     always_comb {
         // Memory stage and external RAM port.
-        o_rom_addr = r_pc[11:2];
+        o_rom_addr = r_pc[ROM_ADDRESS_WIDTH - 1:2];
         // Alexandrite exposes the low ten bits of the byte address directly.
         // The RAM implementation is responsible for selecting the addressed word.
         o_ram_addr       = r_mem_alu[9:0];
@@ -368,17 +377,18 @@ pub module Chrysoberyl (
         // forward conditional branches are not taken, and direct jumps are
         // always taken. Indirect JALR-family jumps continue to resolve in EX.
         if r_fetch_cross {
-            w_fetch_pc = {20'b0, r_fetch_pc};
+            w_fetch_pc = r_fetch_pc as 32;
         } else {
-            w_fetch_pc = {20'b0, r_pc};
+            w_fetch_pc = r_pc as 32;
         }
         w_fetch_ctrl_imm  = 0;
         w_fetch_target    = w_fetch_pc;
         w_fetch_pred_taken = false;
+        w_fetch_bht_index = w_fetch_pc[6:1];
         if w_fetch_inst[6:0] == 7'b1100011 {
             w_fetch_ctrl_imm = {w_fetch_inst[31] repeat 20, w_fetch_inst[7], w_fetch_inst[30:25], w_fetch_inst[11:8], 1'b0};
             w_fetch_target = w_fetch_pc + w_fetch_ctrl_imm;
-            w_fetch_pred_taken = w_fetch_ctrl_imm[31];
+            w_fetch_pred_taken = w_history_pred_taken;
         } else if w_fetch_inst[6:0] == 7'b1101111 {
             w_fetch_ctrl_imm = {w_fetch_inst[31] repeat 12, w_fetch_inst[19:12], w_fetch_inst[20], w_fetch_inst[30:21], 1'b0};
             w_fetch_target = w_fetch_pc + w_fetch_ctrl_imm;
@@ -404,7 +414,7 @@ pub module Chrysoberyl (
         d_uses_rs1     = false;
         d_uses_rs2     = false;
         d_imm          = 0;
-        d_pc           = {20'b0, r_id_pc};
+        d_pc           = r_id_pc as 32;
         case r_id_inst[6:0] {
             7'b0110111: {
                 d_imm       = {r_id_inst[31:12], 12'b0};
@@ -586,6 +596,60 @@ pub module Chrysoberyl (
             && ((d_uses_rs1 && d_rs1 == r_ex_rd) || (d_uses_rs2 && d_rs2 == r_ex_rd));
     }
 
+    if USE_HISTORY_PREDICTION :g_history_prediction {
+        var r_bht_valid  : logic    [64];
+        var r_bht_counter: logic<2> [64];
+
+        always_comb {
+            if r_bht_valid[w_fetch_bht_index] {
+                w_history_pred_taken = r_bht_counter[w_fetch_bht_index][1];
+            } else {
+                w_history_pred_taken = w_fetch_ctrl_imm[31];
+            }
+        }
+
+        always_ff (i_clk, i_rst) {
+            if_reset {
+                for i in 0..64 {
+                    r_bht_valid[i]   = false;
+                    r_bht_counter[i] = 0;
+                }
+            } else if r_ex_valid && r_ex_branch != 0 {
+                if !r_bht_valid[r_ex_bht_index] {
+                    r_bht_valid[r_ex_bht_index] = true;
+                    if w_ex_branch_ok {
+                        r_bht_counter[r_ex_bht_index] = 2'b10;
+                    } else {
+                        r_bht_counter[r_ex_bht_index] = 2'b01;
+                    }
+                } else {
+                    case r_bht_counter[r_ex_bht_index] {
+                        2'b00: if w_ex_branch_ok { r_bht_counter[r_ex_bht_index] = 2'b01; }
+                        2'b01: {
+                            if w_ex_branch_ok {
+                                r_bht_counter[r_ex_bht_index] = 2'b10;
+                            } else {
+                                r_bht_counter[r_ex_bht_index] = 2'b00;
+                            }
+                        }
+                        2'b10: {
+                            if w_ex_branch_ok {
+                                r_bht_counter[r_ex_bht_index] = 2'b11;
+                            } else {
+                                r_bht_counter[r_ex_bht_index] = 2'b01;
+                            }
+                        }
+                        2'b11: if !w_ex_branch_ok { r_bht_counter[r_ex_bht_index] = 2'b10; }
+                    }
+                }
+            }
+        }
+    } else :g_static_prediction {
+        always_comb {
+            w_history_pred_taken = w_fetch_ctrl_imm[31];
+        }
+    }
+
     always_ff (i_clk, i_rst) {
         if_reset {
             r_pc              = 0;
@@ -593,6 +657,7 @@ pub module Chrysoberyl (
             r_id_pc           = 0;
             r_id_len          = 4;
             r_id_pred_taken   = false;
+            r_id_bht_index    = 0;
             r_finish          = false;
             r_fetch_cross     = false;
             r_fetch_low16     = 0;
@@ -614,6 +679,7 @@ pub module Chrysoberyl (
             r_ex_pc4          = 0;
             r_ex_jump_addr    = 0;
             r_ex_pred_taken   = false;
+            r_ex_bht_index    = 0;
             r_mem_alu         = 0;
             r_mem_store_data  = 0;
             r_mem_rd          = 0;
@@ -647,17 +713,20 @@ pub module Chrysoberyl (
                 r_finish = true;
             }
             if w_ex_redirect {
-                r_pc       = w_ex_redirect_addr[11:0];
+                r_pc       = w_ex_redirect_addr[ROM_ADDRESS_WIDTH - 1:0];
                 r_id_inst  = 0;
                 r_id_pc    = 0;
                 r_id_len   = 4;
                 r_id_pred_taken = false;
+                r_id_bht_index = 0;
                 r_fetch_cross = false;
                 r_ex_valid = false;
                 r_ex_pred_taken = false;
+                r_ex_bht_index = 0;
             } else if w_load_stall {
                 r_ex_valid = false;
                 r_ex_pred_taken = false;
+                r_ex_bht_index = 0;
             } else {
                 r_ex_valid        = d_valid;
                 r_ex_a            = d_a;
@@ -672,18 +741,20 @@ pub module Chrysoberyl (
                 r_ex_mem_unsigned = d_mem_unsigned;
                 r_ex_reg_write    = d_reg_write;
                 r_ex_wb_sel       = d_wb_sel;
-                r_ex_pc4          = {20'b0, r_id_pc} + r_id_len;
+                r_ex_pc4          = (r_id_pc as 32) + (r_id_len as 32);
                 r_ex_jump_addr    = d_jump_addr;
                 r_ex_pred_taken   = r_id_pred_taken;
+                r_ex_bht_index    = r_id_bht_index;
                 if r_fetch_cross {
                     r_id_inst     = w_fetch_inst;
                     r_id_pc       = r_fetch_pc;
                     r_id_len      = 4;
                     r_id_pred_taken = w_fetch_pred_taken;
+                    r_id_bht_index = w_fetch_bht_index;
                     if w_fetch_pred_taken {
-                        r_pc = w_fetch_target[11:0];
+                        r_pc = w_fetch_target[ROM_ADDRESS_WIDTH - 1:0];
                     } else {
-                        r_pc = r_pc + 2;
+                        r_pc = r_pc + (2 as ROM_ADDRESS_WIDTH);
                     }
                     r_fetch_cross = false;
                 } else if r_pc[1] && w_fetch_half[1:0] == 2'b11 {
@@ -691,19 +762,21 @@ pub module Chrysoberyl (
                     r_id_pc        = 0;
                     r_id_len       = 4;
                     r_id_pred_taken = false;
+                    r_id_bht_index = 0;
                     r_fetch_low16  = w_fetch_half;
                     r_fetch_pc     = r_pc;
                     r_fetch_cross  = true;
-                    r_pc           = r_pc + 2;
+                    r_pc           = r_pc + (2 as ROM_ADDRESS_WIDTH);
                 } else {
                     r_id_inst = w_fetch_inst;
                     r_id_pc   = r_pc;
                     r_id_len  = w_fetch_len;
                     r_id_pred_taken = w_fetch_pred_taken;
+                    r_id_bht_index = w_fetch_bht_index;
                     if w_fetch_pred_taken {
-                        r_pc = w_fetch_target[11:0];
+                        r_pc = w_fetch_target[ROM_ADDRESS_WIDTH - 1:0];
                     } else {
-                        r_pc = r_pc + w_fetch_len;
+                        r_pc = r_pc + (w_fetch_len as ROM_ADDRESS_WIDTH);
                     }
                 }
             }

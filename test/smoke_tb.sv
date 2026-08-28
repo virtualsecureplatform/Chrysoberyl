@@ -2,7 +2,7 @@ module smoke_tb;
     logic clk = 0;
     logic rst = 1;
     logic [31:0] rom_data;
-    logic [9:0] rom_addr;
+    logic [11:0] rom_addr;
     logic [31:0] ram_read_data = 0;
     logic [9:0] ram_addr;
     logic [31:0] ram_write_data;

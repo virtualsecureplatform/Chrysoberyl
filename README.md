@@ -12,10 +12,22 @@ RV32C compressed-instruction extension, including mixed 16/32-bit streams and
 branches, jumps, loads, stores, `LUI`, and `AUIPC` are supported. CSR and
 system instructions remain intentionally outside Alexandrite's scope.
 
+The instruction address space defaults to 16 KiB. Set the elaboration-time
+`ROM_SIZE_BYTES` module parameter to another power-of-two byte size when a
+different ROM capacity is required; the PC and word-address output widths are
+derived from that value.
+
 Control flow uses a static fetch-stage predictor: backward conditional branches
 are predicted taken, forward conditional branches are predicted not taken, and
 direct jumps are predicted taken. Indirect jumps continue to resolve in the
 execute stage.
+
+Set the `USE_HISTORY_PREDICTION` module parameter to `true` to replace BTFNT
+conditional-branch decisions with a 64-entry local history table. Each valid
+entry is a two-bit saturating counter indexed by halfword PC bits `[6:1]`;
+untrained entries fall back to BTFNT. The table is tagless, so aliased branch
+PCs intentionally share history. Direct and indirect jump policies are
+unchanged.
 
 ## Build
 
@@ -33,3 +45,25 @@ Run the included smoke test plus directed RV32I and RV32C instruction tests with
 ```sh
 sh test/run_smoke.sh
 ```
+
+## Upstream RISC-V ISA tests
+
+The latest [riscv-tests](https://github.com/riscv-software-src/riscv-tests)
+repository is pinned as a Git submodule. Initialize it after cloning with:
+
+```sh
+git submodule update --init
+```
+
+Run the 37 unprivileged `rv32ui` tests and the upstream `rv32uc` compressed
+instruction test with:
+
+```sh
+sh test/run_riscv_tests.sh
+```
+
+The runner builds the current Veryl source with Verilator, compiles each test
+using Clang's RISC-V target, loads a flat ROM/RAM image, and observes the
+standard `tohost` result. Set `VERYL`, `RISCV_CC`, or `RISCV_LD` to override the
+corresponding tools. Chrysoberyl provides a 16 KiB instruction address space so
+the complete upstream `rv32uc` image fits without modification.

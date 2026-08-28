@@ -2,14 +2,14 @@ module branch_prediction_tb;
     logic clk = 0;
     logic rst = 1;
     logic [31:0] rom_data;
-    logic [9:0] rom_addr;
+    logic [11:0] rom_addr;
     logic [31:0] ram_read_data;
     logic [9:0] ram_addr;
     logic [31:0] ram_write_data;
     logic [3:0] ram_we;
     logic finish;
     logic [31:0] x [32];
-    logic [31:0] rom [0:1023];
+    logic [31:0] rom [0:4095];
     logic [31:0] ram [0:1023];
     integer controls = 0;
     integer predicted_taken = 0;
@@ -50,6 +50,7 @@ module branch_prediction_tb;
 
     initial begin
         for (int n = 0; n < 1024; n++) begin rom[n] = 32'h00000013; ram[n] = 0; end
+        for (int n = 1024; n < 4096; n++) rom[n] = 32'h00000013;
         $readmemh("test/branch_prediction.hex", rom, 0, 19);
         #2 rst = 0;
         #10 rst = 1;
