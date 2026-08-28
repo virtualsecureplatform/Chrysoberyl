@@ -12,6 +12,11 @@ RV32C compressed-instruction extension, including mixed 16/32-bit streams and
 branches, jumps, loads, stores, `LUI`, and `AUIPC` are supported. CSR and
 system instructions remain intentionally outside Alexandrite's scope.
 
+Control flow uses a static fetch-stage predictor: backward conditional branches
+are predicted taken, forward conditional branches are predicted not taken, and
+direct jumps are predicted taken. Indirect jumps continue to resolve in the
+execute stage.
+
 ## Build
 
 Install [Veryl](https://veryl-lang.org/) and run:
