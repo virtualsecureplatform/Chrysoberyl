@@ -1,0 +1,462 @@
+/// Chrysoberyl is a compact, in-order RV32I processor ported from Alexandrite.
+///
+/// The core has the same Harvard-style instruction/data memory interface as
+/// Alexandrite.  Both memories are combinational-read; writes are committed by
+/// the environment on `i_clk` when `o_ram_we` is asserted.
+pub module Chrysoberyl (
+    i_clk           : input  clock         ,
+    i_rst           : input  reset         ,
+    i_rom_data      : input  logic<32>     ,
+    o_rom_addr      : output logic<10>     ,
+    i_ram_read_data : input  logic<32>     ,
+    o_ram_addr      : output logic<10>     ,
+    o_ram_write_data: output logic<32>     ,
+    o_ram_we        : output logic<4>      ,
+    o_finish        : output logic         ,
+    o_x             : output logic<32> [32],
+) {
+    // Architectural state and IF/ID pipeline register.
+    var r_x      : logic<32> [32];
+    var r_pc     : logic<12>     ;
+    var r_id_inst: logic<32>     ;
+    var r_id_pc  : logic<12>     ;
+    var r_finish : logic         ;
+
+    // ID/EX pipeline register.
+    var r_ex_valid       : logic    ;
+    var r_ex_a           : logic<32>;
+    var r_ex_b           : logic<32>;
+    var r_ex_store_data  : logic<32>;
+    var r_ex_rd          : logic<5> ;
+    var r_ex_alu_op      : logic<4> ;
+    var r_ex_branch      : logic<3> ;
+    var r_ex_mem_read    : logic    ;
+    var r_ex_mem_write   : logic    ;
+    var r_ex_mem_size    : logic<2> ;
+    var r_ex_mem_unsigned: logic    ;
+    var r_ex_reg_write   : logic    ;
+    var r_ex_wb_sel      : logic<2> ;
+    var r_ex_pc4         : logic<32>;
+    var r_ex_jump_addr   : logic<32>;
+
+    // EX/MEM pipeline register.
+    var r_mem_valid     : logic    ;
+    var r_mem_alu       : logic<32>;
+    var r_mem_store_data: logic<32>;
+    var r_mem_rd        : logic<5> ;
+    var r_mem_read      : logic    ;
+    var r_mem_write     : logic    ;
+    var r_mem_size      : logic<2> ;
+    var r_mem_unsigned  : logic    ;
+    var r_mem_reg_write : logic    ;
+    var r_mem_wb_sel    : logic<2> ;
+    var r_mem_pc4       : logic<32>;
+
+    // Decode signals. ALU ops: add, sub, and, or, xor, slt, sltu, sll, srl, sra.
+    var d_valid       : logic    ;
+    var d_rs1         : logic<5> ;
+    var d_rs2         : logic<5> ;
+    var d_rd          : logic<5> ;
+    var d_a           : logic<32>;
+    var d_b           : logic<32>;
+    var d_store_data  : logic<32>;
+    var d_alu_op      : logic<4> ;
+    var d_branch      : logic<3> ;
+    var d_mem_read    : logic    ;
+    var d_mem_write   : logic    ;
+    var d_mem_size    : logic<2> ;
+    var d_mem_unsigned: logic    ;
+    var d_reg_write   : logic    ;
+    var d_wb_sel      : logic<2> ;
+    var d_uses_rs1    : logic    ;
+    var d_uses_rs2    : logic    ;
+    var d_imm         : logic<32>;
+    var d_pc          : logic<32>;
+    var d_jump_addr   : logic<32>;
+
+    var w_ex_alu      : logic<32>;
+    var w_ex_branch_ok: logic    ;
+    var w_ex_jump     : logic    ;
+    var w_wb_data     : logic<32>;
+    var w_shifted_data: logic<32>;
+    var w_load_stall  : logic    ;
+
+    always_comb {
+        // Memory stage and external RAM port.
+        o_rom_addr = r_pc[11:2];
+        // Alexandrite exposes the low ten bits of the byte address directly.
+        // The RAM implementation is responsible for selecting the addressed word.
+        o_ram_addr       = r_mem_alu[9:0];
+        o_ram_write_data = r_mem_store_data;
+        o_ram_we         = 0;
+        if r_mem_valid && r_mem_write {
+            case r_mem_size {
+                2'd0: o_ram_we = 4'b0001 << r_mem_alu[1:0];
+                2'd1: {
+                    if r_mem_alu[1] {
+                        o_ram_we = 4'b1100;
+                    } else {
+                        o_ram_we = 4'b0011;
+                    }
+                }
+                default: o_ram_we = 4'b1111;
+            }
+            case r_mem_size {
+                2'd0   : o_ram_write_data = r_mem_store_data << (r_mem_alu[1:0] * 8);
+                2'd1   : o_ram_write_data = r_mem_store_data << (r_mem_alu[1] * 16);
+                default: o_ram_write_data = r_mem_store_data;
+            }
+        }
+
+        w_wb_data      = r_mem_alu;
+        w_shifted_data = i_ram_read_data >> (r_mem_alu[1:0] * 8);
+        if r_mem_wb_sel == 2'd1 {
+            case r_mem_size {
+                2'd0: {
+                    w_wb_data = {24'b0, w_shifted_data[7:0]};
+                    if !r_mem_unsigned && w_wb_data[7] {
+                        w_wb_data = {w_wb_data[7] repeat 24, w_wb_data[7:0]};
+                    }
+                }
+                2'd1: {
+                    if r_mem_alu[1] {
+                        w_wb_data = {16'b0, i_ram_read_data[31:16]};
+                    } else {
+                        w_wb_data = {16'b0, i_ram_read_data[15:0]};
+                    }
+                    if !r_mem_unsigned && w_wb_data[15] {
+                        w_wb_data = {w_wb_data[15] repeat 16, w_wb_data[15:0]};
+                    }
+                }
+                default: w_wb_data = i_ram_read_data;
+            }
+        } else if r_mem_wb_sel == 2'd2 {
+            w_wb_data = r_mem_pc4;
+        }
+
+        // Execute stage.
+        case r_ex_alu_op {
+            4'd1: w_ex_alu = r_ex_a - r_ex_b;
+            4'd2: w_ex_alu = r_ex_a & r_ex_b;
+            4'd3: w_ex_alu = r_ex_a | r_ex_b;
+            4'd4: w_ex_alu = r_ex_a ^ r_ex_b;
+            4'd5: {
+                if $signed(r_ex_a) <: $signed(r_ex_b) {
+                    w_ex_alu = 1;
+                } else {
+                    w_ex_alu = 0;
+                }
+            }
+            4'd6: {
+                if r_ex_a <: r_ex_b {
+                    w_ex_alu = 1;
+                } else {
+                    w_ex_alu = 0;
+                }
+            }
+            4'd7   : w_ex_alu = r_ex_a << r_ex_b[4:0];
+            4'd8   : w_ex_alu = r_ex_a >> r_ex_b[4:0];
+            4'd9   : w_ex_alu = $signed(r_ex_a) >>> r_ex_b[4:0];
+            4'd10  : w_ex_alu = r_ex_b;
+            default: w_ex_alu = r_ex_a + r_ex_b;
+        }
+        w_ex_branch_ok = false;
+        case r_ex_branch {
+            3'd1   : w_ex_branch_ok = r_ex_a == r_ex_b;
+            3'd2   : w_ex_branch_ok = r_ex_a != r_ex_b;
+            3'd3   : w_ex_branch_ok = $signed(r_ex_a) <: $signed(r_ex_b);
+            3'd4   : w_ex_branch_ok = $signed(r_ex_a) >= $signed(r_ex_b);
+            3'd5   : w_ex_branch_ok = r_ex_a <: r_ex_b;
+            3'd6   : w_ex_branch_ok = r_ex_a >= r_ex_b;
+            default: w_ex_branch_ok = false;
+        }
+        w_ex_jump = r_ex_valid && ((r_ex_branch != 0 && w_ex_branch_ok) || r_ex_wb_sel == 2'd2);
+
+        // Decode defaults.
+        d_valid        = true;
+        d_rs1          = r_id_inst[19:15];
+        d_rs2          = r_id_inst[24:20];
+        d_rd           = r_id_inst[11:7];
+        d_a            = 0;
+        d_b            = 0;
+        d_store_data   = 0;
+        d_alu_op       = 0;
+        d_branch       = 0;
+        d_mem_read     = false;
+        d_mem_write    = false;
+        d_mem_size     = 2'd2;
+        d_mem_unsigned = false;
+        d_reg_write    = false;
+        d_wb_sel       = 0;
+        d_uses_rs1     = false;
+        d_uses_rs2     = false;
+        d_imm          = 0;
+        d_pc           = {20'b0, r_id_pc};
+        case r_id_inst[6:0] {
+            7'b0110111: {
+                d_imm       = {r_id_inst[31:12], 12'b0};
+                d_b         = d_imm;
+                d_alu_op    = 4'd10;
+                d_reg_write = true;
+            }
+            7'b0010111: {
+                d_imm       = {r_id_inst[31:12], 12'b0};
+                d_a         = d_pc;
+                d_b         = d_imm;
+                d_reg_write = true;
+            }
+            7'b1101111: {
+                d_imm       = {r_id_inst[31] repeat 12, r_id_inst[19:12], r_id_inst[20], r_id_inst[30:21], 1'b0};
+                d_a         = d_pc;
+                d_b         = d_imm;
+                d_reg_write = true;
+                d_wb_sel    = 2'd2;
+            }
+            7'b1100111: {
+                d_imm       = {r_id_inst[31] repeat 20, r_id_inst[31:20]};
+                d_b         = d_imm;
+                d_uses_rs1  = true;
+                d_reg_write = true;
+                d_wb_sel    = 2'd2;
+            }
+            7'b1100011: {
+                d_imm      = {r_id_inst[31] repeat 20, r_id_inst[7], r_id_inst[30:25], r_id_inst[11:8], 1'b0};
+                d_a        = d_pc;
+                d_b        = d_imm;
+                d_uses_rs1 = true;
+                d_uses_rs2 = true;
+                case r_id_inst[14:12] {
+                    3'd0   : d_branch = 1;
+                    3'd1   : d_branch = 2;
+                    3'd4   : d_branch = 3;
+                    3'd5   : d_branch = 4;
+                    3'd6   : d_branch = 5;
+                    3'd7   : d_branch = 6;
+                    default: d_valid  = false;
+                }
+            }
+            7'b0000011: {
+                d_imm       = {r_id_inst[31] repeat 20, r_id_inst[31:20]};
+                d_b         = d_imm;
+                d_uses_rs1  = true;
+                d_mem_read  = true;
+                d_reg_write = true;
+                d_wb_sel    = 1;
+                case r_id_inst[14:12] {
+                    3'd0: d_mem_size = 0;
+                    3'd1: d_mem_size = 1;
+                    3'd2: d_mem_size = 2;
+                    3'd4: {
+                        d_mem_size     = 0;
+                        d_mem_unsigned = true;
+                    }
+                    3'd5: {
+                        d_mem_size     = 1;
+                        d_mem_unsigned = true;
+                    }
+                    default: d_valid = false;
+                }
+            }
+            7'b0100011: {
+                d_imm       = {r_id_inst[31] repeat 20, r_id_inst[31:25], r_id_inst[11:7]};
+                d_b         = d_imm;
+                d_uses_rs1  = true;
+                d_uses_rs2  = true;
+                d_mem_write = true;
+                case r_id_inst[14:12] {
+                    3'd0   : d_mem_size = 0;
+                    3'd1   : d_mem_size = 1;
+                    3'd2   : d_mem_size = 2;
+                    default: d_valid    = false;
+                }
+            }
+            7'b0010011: {
+                d_imm       = {r_id_inst[31] repeat 20, r_id_inst[31:20]};
+                d_b         = d_imm;
+                d_uses_rs1  = true;
+                d_reg_write = true;
+                case r_id_inst[14:12] {
+                    3'd0: d_alu_op = 0;
+                    3'd2: d_alu_op = 5;
+                    3'd3: d_alu_op = 6;
+                    3'd4: d_alu_op = 4;
+                    3'd6: d_alu_op = 3;
+                    3'd7: d_alu_op = 2;
+                    3'd1: d_alu_op = 7;
+                    3'd5: {
+                        if r_id_inst[30] {
+                            d_alu_op = 9;
+                        } else {
+                            d_alu_op = 8;
+                        }
+                    }
+                    default: d_valid = false;
+                }
+            }
+            7'b0110011: {
+                d_uses_rs1  = true;
+                d_uses_rs2  = true;
+                d_reg_write = true;
+                case r_id_inst[14:12] {
+                    3'd0: {
+                        if r_id_inst[30] {
+                            d_alu_op = 1;
+                        } else {
+                            d_alu_op = 0;
+                        }
+                    }
+                    3'd1: d_alu_op = 7;
+                    3'd2: d_alu_op = 5;
+                    3'd3: d_alu_op = 6;
+                    3'd4: d_alu_op = 4;
+                    3'd5: {
+                        if r_id_inst[30] {
+                            d_alu_op = 9;
+                        } else {
+                            d_alu_op = 8;
+                        }
+                    }
+                    3'd6   : d_alu_op = 3;
+                    3'd7   : d_alu_op = 2;
+                    default: d_valid  = false;
+                }
+            }
+            default: d_valid = false;
+        }
+        if d_uses_rs1 {
+            if d_rs1 == 0 {
+                d_a = 0;
+            } else {
+                d_a = r_x[d_rs1];
+            }
+        }
+        if d_uses_rs2 {
+            if d_rs2 == 0 {
+                d_store_data = 0;
+            } else {
+                d_store_data = r_x[d_rs2];
+            }
+            if r_id_inst[6:0] == 7'b0110011 || r_id_inst[6:0] == 7'b1100011 {
+                d_b = d_store_data;
+            }
+        }
+        // Bypass EX ALU results and the writeback result. Loads are interlocked below.
+        if d_uses_rs1 && r_ex_valid && r_ex_reg_write && !r_ex_mem_read && r_ex_rd != 0 && d_rs1 == r_ex_rd {
+            d_a = w_ex_alu;
+        }
+        if d_uses_rs2 && r_ex_valid && r_ex_reg_write && !r_ex_mem_read && r_ex_rd != 0 && d_rs2 == r_ex_rd {
+            d_store_data = w_ex_alu;
+            if r_id_inst[6:0] == 7'b0110011 || r_id_inst[6:0] == 7'b1100011 {
+                d_b = w_ex_alu;
+            }
+        }
+        if d_uses_rs1 && r_mem_valid && r_mem_reg_write && r_mem_rd != 0 && d_rs1 == r_mem_rd {
+            d_a = w_wb_data;
+        }
+        if d_uses_rs2 && r_mem_valid && r_mem_reg_write && r_mem_rd != 0 && d_rs2 == r_mem_rd {
+            d_store_data = w_wb_data;
+            if r_id_inst[6:0] == 7'b0110011 || r_id_inst[6:0] == 7'b1100011 {
+                d_b = w_wb_data;
+            }
+        }
+        // Branches compare registers but use the instruction PC as their target base.
+        // JALR additionally clears bit 0 as required by the RV32I specification.
+        d_jump_addr = d_a + d_b;
+        if d_branch != 0 {
+            d_jump_addr = d_pc + d_imm;
+        } else if r_id_inst[6:0] == 7'b1100111 {
+            d_jump_addr[0] = 0;
+        }
+        w_load_stall = r_ex_valid && r_ex_mem_read && r_ex_rd != 0
+            && ((d_uses_rs1 && d_rs1 == r_ex_rd) || (d_uses_rs2 && d_rs2 == r_ex_rd));
+    }
+
+    always_ff (i_clk, i_rst) {
+        if_reset {
+            r_pc              = 0;
+            r_id_inst         = 0;
+            r_id_pc           = 0;
+            r_finish          = false;
+            r_ex_valid        = false;
+            r_mem_valid       = false;
+            r_ex_a            = 0;
+            r_ex_b            = 0;
+            r_ex_store_data   = 0;
+            r_ex_rd           = 0;
+            r_ex_alu_op       = 0;
+            r_ex_branch       = 0;
+            r_ex_mem_read     = false;
+            r_ex_mem_write    = false;
+            r_ex_mem_size     = 0;
+            r_ex_mem_unsigned = false;
+            r_ex_reg_write    = false;
+            r_ex_wb_sel       = 0;
+            r_ex_pc4          = 0;
+            r_ex_jump_addr    = 0;
+            r_mem_alu         = 0;
+            r_mem_store_data  = 0;
+            r_mem_rd          = 0;
+            r_mem_read        = false;
+            r_mem_write       = false;
+            r_mem_size        = 0;
+            r_mem_unsigned    = false;
+            r_mem_reg_write   = false;
+            r_mem_wb_sel      = 0;
+            r_mem_pc4         = 0;
+            for i in 0..32 {
+                r_x[i] = 0;
+            }
+        } else {
+            if r_mem_valid && r_mem_reg_write && r_mem_rd != 0 {
+                r_x[r_mem_rd] = w_wb_data;
+            }
+            r_x[0]           = 0;
+            r_mem_valid      = r_ex_valid;
+            r_mem_alu        = w_ex_alu;
+            r_mem_store_data = r_ex_store_data;
+            r_mem_rd         = r_ex_rd;
+            r_mem_read       = r_ex_mem_read;
+            r_mem_write      = r_ex_mem_write;
+            r_mem_size       = r_ex_mem_size;
+            r_mem_unsigned   = r_ex_mem_unsigned;
+            r_mem_reg_write  = r_ex_reg_write;
+            r_mem_wb_sel     = r_ex_wb_sel;
+            r_mem_pc4        = r_ex_pc4;
+            if r_mem_valid && r_mem_write && r_mem_alu == 4 && r_mem_store_data != 0 {
+                r_finish = true;
+            }
+            if w_ex_jump {
+                r_pc       = r_ex_jump_addr[11:0];
+                r_id_inst  = 0;
+                r_id_pc    = 0;
+                r_ex_valid = false;
+            } else if w_load_stall {
+                r_ex_valid = false;
+            } else {
+                r_id_inst         = i_rom_data;
+                r_id_pc           = r_pc;
+                r_pc              = r_pc + 4;
+                r_ex_valid        = d_valid;
+                r_ex_a            = d_a;
+                r_ex_b            = d_b;
+                r_ex_store_data   = d_store_data;
+                r_ex_rd           = d_rd;
+                r_ex_alu_op       = d_alu_op;
+                r_ex_branch       = d_branch;
+                r_ex_mem_read     = d_mem_read;
+                r_ex_mem_write    = d_mem_write;
+                r_ex_mem_size     = d_mem_size;
+                r_ex_mem_unsigned = d_mem_unsigned;
+                r_ex_reg_write    = d_reg_write;
+                r_ex_wb_sel       = d_wb_sel;
+                r_ex_pc4          = {20'b0, r_id_pc} + 4;
+                r_ex_jump_addr    = d_jump_addr;
+            }
+        }
+    }
+
+    assign o_finish = r_finish;
+    for i in 0..32 :g_register_output {
+        assign o_x[i] = r_x[i];
+    }
+}
