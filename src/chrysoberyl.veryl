@@ -1,4 +1,4 @@
-/// Chrysoberyl is a compact, in-order RV32IC processor ported from Alexandrite.
+/// Chrysoberyl is a compact, in-order RV32IC_Zcb processor ported from Alexandrite.
 ///
 /// The core has the same Harvard-style instruction/data memory interface as
 /// Alexandrite.  Both memories are combinational-read; writes are committed by
@@ -251,6 +251,38 @@ pub module Chrysoberyl #(
                             w_c_imm = {25'b0, w_fetch_half[5], w_fetch_half[12:10], w_fetch_half[6], 2'b0};
                             w_fetch_inst = {w_c_imm[11:0], {2'b01, w_fetch_half[9:7]}, 3'b010, w_c_rd, 7'b0000011};
                         }
+                        // Zcb byte/halfword loads and stores
+                        3'b100: {
+                            w_c_rd = {2'b01, w_fetch_half[4:2]};
+                            case w_fetch_half[12:10] {
+                                // C.LBU
+                                3'b000: {
+                                    w_c_imm = {30'b0, w_fetch_half[5], w_fetch_half[6]};
+                                    w_fetch_inst = {w_c_imm[11:0], {2'b01, w_fetch_half[9:7]}, 3'b100, w_c_rd, 7'b0000011};
+                                }
+                                // C.LHU / C.LH
+                                3'b001: {
+                                    w_c_imm = {30'b0, w_fetch_half[5], 1'b0};
+                                    if w_fetch_half[6] {
+                                        w_fetch_inst = {w_c_imm[11:0], {2'b01, w_fetch_half[9:7]}, 3'b001, w_c_rd, 7'b0000011};
+                                    } else {
+                                        w_fetch_inst = {w_c_imm[11:0], {2'b01, w_fetch_half[9:7]}, 3'b101, w_c_rd, 7'b0000011};
+                                    }
+                                }
+                                // C.SB
+                                3'b010: {
+                                    w_c_imm = {30'b0, w_fetch_half[5], w_fetch_half[6]};
+                                    w_fetch_inst = {w_c_imm[11:5], w_c_rd, {2'b01, w_fetch_half[9:7]}, 3'b000, w_c_imm[4:0], 7'b0100011};
+                                }
+                                // C.SH
+                                3'b011: {
+                                    w_c_imm = {30'b0, w_fetch_half[5], 1'b0};
+                                    w_fetch_inst = {w_c_imm[11:5], w_c_rd, {2'b01, w_fetch_half[9:7]}, 3'b001, w_c_imm[4:0], 7'b0100011};
+                                    if w_fetch_half[6] { w_fetch_legal = false; }
+                                }
+                                default: w_fetch_legal = false;
+                            }
+                        }
                         // C.SW
                         3'b110: {
                             w_c_imm = {25'b0, w_fetch_half[5], w_fetch_half[12:10], w_fetch_half[6], 2'b0};
@@ -304,13 +336,22 @@ pub module Chrysoberyl #(
                                     w_fetch_inst = {w_c_imm[11:0], w_c_rd, 3'b111, w_c_rd, 7'b0010011};
                                 }
                                 default: {
-                                    case w_fetch_half[6:5] {
-                                        2'b00: w_fetch_inst = {7'b0100000, {2'b01, w_fetch_half[4:2]}, w_c_rd, 3'b000, w_c_rd, 7'b0110011};
-                                        2'b01: w_fetch_inst = {7'b0000000, {2'b01, w_fetch_half[4:2]}, w_c_rd, 3'b100, w_c_rd, 7'b0110011};
-                                        2'b10: w_fetch_inst = {7'b0000000, {2'b01, w_fetch_half[4:2]}, w_c_rd, 3'b110, w_c_rd, 7'b0110011};
-                                        2'b11: w_fetch_inst = {7'b0000000, {2'b01, w_fetch_half[4:2]}, w_c_rd, 3'b111, w_c_rd, 7'b0110011};
+                                    if w_fetch_half[12] {
+                                        case w_fetch_half[6:2] {
+                                            // C.ZEXT.B
+                                            5'b11000: w_fetch_inst = {12'h0ff, w_c_rd, 3'b111, w_c_rd, 7'b0010011};
+                                            // C.NOT
+                                            5'b11101: w_fetch_inst = {12'hfff, w_c_rd, 3'b100, w_c_rd, 7'b0010011};
+                                            default: w_fetch_legal = false;
+                                        }
+                                    } else {
+                                        case w_fetch_half[6:5] {
+                                            2'b00: w_fetch_inst = {7'b0100000, {2'b01, w_fetch_half[4:2]}, w_c_rd, 3'b000, w_c_rd, 7'b0110011};
+                                            2'b01: w_fetch_inst = {7'b0000000, {2'b01, w_fetch_half[4:2]}, w_c_rd, 3'b100, w_c_rd, 7'b0110011};
+                                            2'b10: w_fetch_inst = {7'b0000000, {2'b01, w_fetch_half[4:2]}, w_c_rd, 3'b110, w_c_rd, 7'b0110011};
+                                            2'b11: w_fetch_inst = {7'b0000000, {2'b01, w_fetch_half[4:2]}, w_c_rd, 3'b111, w_c_rd, 7'b0110011};
+                                        }
                                     }
-                                    if w_fetch_half[12] { w_fetch_legal = false; }
                                 }
                             }
                         }
