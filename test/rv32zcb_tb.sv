@@ -58,10 +58,12 @@ module rv32zcb_tb;
             $fatal(1, "Zcb halfword-load offset or extension failure");
         if (dut.r_x[8] !== 32'h00000080 || dut.r_x[15] !== 32'hedcba987)
             $fatal(1, "Zcb unary operation failure: x8=%h x15=%h", dut.r_x[8], dut.r_x[15]);
-        if (dut.r_x[9] !== 32'h11111181 || dut.r_x[10] !== 32'h22228001
-            || dut.r_x[11] !== 32'h33338001 || dut.r_x[12] !== 7 || dut.r_x[13] !== 9)
-            $fatal(1, "dependency-gated Zcb encoding executed unexpectedly");
-        $display("PASS: Chrysoberyl RV32IC-qualified Zcb directed test");
+        if (dut.r_x[9] !== 32'hffffff81 || dut.r_x[10] !== 32'h00008001
+            || dut.r_x[11] !== 32'hffff8001)
+            $fatal(1, "Zbb-dependent Zcb extension failure");
+        if (dut.r_x[12] !== 7 || dut.r_x[13] !== 9)
+            $fatal(1, "C.MUL executed without M or Zmmul");
+        $display("PASS: Chrysoberyl RV32IC_Zbb_Zcb directed test");
         $finish;
     end
 

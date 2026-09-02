@@ -42,15 +42,17 @@ _start:
     li          x15, 0x12345678
     c.not       x15
 
-    # These encodings require Zbb or M/Zmmul and must remain illegal bubbles.
+    # Zbb enables the compressed sign/zero-extension instructions.
     li          x9, 0x11111181
     li          x10, 0x22228001
     li          x11, 0x33338001
     li          x12, 7
     li          x13, 9
-    .2byte      0x9ce5      # c.sext.b x9
-    .2byte      0x9d69      # c.zext.h x10
-    .2byte      0x9ded      # c.sext.h x11
+    c.sext.b    x9
+    c.zext.h    x10
+    c.sext.h    x11
+
+    # C.MUL still requires M or Zmmul and remains an illegal bubble.
     .2byte      0x9e55      # c.mul x12, x13
 
     # C.SH requires encoding bit 6 to be zero. This reserved variant must not store.

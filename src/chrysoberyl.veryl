@@ -1,4 +1,4 @@
-/// Chrysoberyl is a compact, in-order RV32IC_Zcb processor ported from Alexandrite.
+/// Chrysoberyl is a compact, in-order RV32IC_Zbb_Zcb processor ported from Alexandrite.
 ///
 /// The core has the same Harvard-style instruction/data memory interface as
 /// Alexandrite.  Both memories are combinational-read; writes are committed by
@@ -39,7 +39,7 @@ pub module Chrysoberyl #(
     var r_ex_b           : logic<32>;
     var r_ex_store_data  : logic<32>;
     var r_ex_rd          : logic<5> ;
-    var r_ex_alu_op      : logic<4> ;
+    var r_ex_alu_op      : logic<5> ;
     var r_ex_branch      : logic<3> ;
     var r_ex_mem_read    : logic    ;
     var r_ex_mem_write   : logic    ;
@@ -65,7 +65,7 @@ pub module Chrysoberyl #(
     var r_mem_wb_sel    : logic<2> ;
     var r_mem_pc4       : logic<32>;
 
-    // Decode signals. ALU ops: add, sub, and, or, xor, slt, sltu, sll, srl, sra.
+    // Decode signals.
     var d_valid       : logic    ;
     var d_rs1         : logic<5> ;
     var d_rs2         : logic<5> ;
@@ -73,7 +73,7 @@ pub module Chrysoberyl #(
     var d_a           : logic<32>;
     var d_b           : logic<32>;
     var d_store_data  : logic<32>;
-    var d_alu_op      : logic<4> ;
+    var d_alu_op      : logic<5> ;
     var d_branch      : logic<3> ;
     var d_mem_read    : logic    ;
     var d_mem_write   : logic    ;
@@ -94,6 +94,11 @@ pub module Chrysoberyl #(
     var w_ex_redirect : logic    ;
     var w_ex_redirect_addr: logic<32>;
     var w_ex_forward_data: logic<32>;
+    var w_count_leading: logic<32>;
+    var w_count_trailing: logic<32>;
+    var w_population_count: logic<32>;
+    var w_count_trailing_found: logic;
+    var w_orc_b: logic<32>;
     var w_wb_data     : logic<32>;
     var w_shifted_data: logic<32>;
     var w_load_stall  : logic    ;
@@ -164,30 +169,92 @@ pub module Chrysoberyl #(
             w_wb_data = r_mem_pc4;
         }
 
-        // Execute stage.
+        // Single-cycle Zbb count and byte-granule helpers.
+        w_count_leading        = 32;
+        w_count_trailing       = 32;
+        w_population_count     = 0;
+        w_count_trailing_found = false;
+        for i in 0..32 {
+            if r_ex_a[i] {
+                w_count_leading = (31 - i) as 32;
+                if !w_count_trailing_found {
+                    w_count_trailing = i as 32;
+                    w_count_trailing_found = true;
+                }
+                w_population_count = w_population_count + 1;
+            }
+        }
+        w_orc_b = 0;
+        if r_ex_a[7:0]   != 0 { w_orc_b[7:0]   = 8'hff; }
+        if r_ex_a[15:8]  != 0 { w_orc_b[15:8]  = 8'hff; }
+        if r_ex_a[23:16] != 0 { w_orc_b[23:16] = 8'hff; }
+        if r_ex_a[31:24] != 0 { w_orc_b[31:24] = 8'hff; }
+
+        // Execute stage. Operations 11 through 27 implement RV32 Zbb.
         case r_ex_alu_op {
-            4'd1: w_ex_alu = r_ex_a - r_ex_b;
-            4'd2: w_ex_alu = r_ex_a & r_ex_b;
-            4'd3: w_ex_alu = r_ex_a | r_ex_b;
-            4'd4: w_ex_alu = r_ex_a ^ r_ex_b;
-            4'd5: {
+            5'd1: w_ex_alu = r_ex_a - r_ex_b;
+            5'd2: w_ex_alu = r_ex_a & r_ex_b;
+            5'd3: w_ex_alu = r_ex_a | r_ex_b;
+            5'd4: w_ex_alu = r_ex_a ^ r_ex_b;
+            5'd5: {
                 if $signed(r_ex_a) <: $signed(r_ex_b) {
                     w_ex_alu = 1;
                 } else {
                     w_ex_alu = 0;
                 }
             }
-            4'd6: {
+            5'd6: {
                 if r_ex_a <: r_ex_b {
                     w_ex_alu = 1;
                 } else {
                     w_ex_alu = 0;
                 }
             }
-            4'd7   : w_ex_alu = r_ex_a << r_ex_b[4:0];
-            4'd8   : w_ex_alu = r_ex_a >> r_ex_b[4:0];
-            4'd9   : w_ex_alu = $signed(r_ex_a) >>> r_ex_b[4:0];
-            4'd10  : w_ex_alu = r_ex_b;
+            5'd7 : w_ex_alu = r_ex_a << r_ex_b[4:0];
+            5'd8 : w_ex_alu = r_ex_a >> r_ex_b[4:0];
+            5'd9 : w_ex_alu = $signed(r_ex_a) >>> r_ex_b[4:0];
+            5'd10: w_ex_alu = r_ex_b;
+            5'd11: w_ex_alu = r_ex_a & ~r_ex_b;
+            5'd12: w_ex_alu = r_ex_a | ~r_ex_b;
+            5'd13: w_ex_alu = ~(r_ex_a ^ r_ex_b);
+            5'd14: w_ex_alu = w_count_leading;
+            5'd15: w_ex_alu = w_count_trailing;
+            5'd16: w_ex_alu = w_population_count;
+            5'd17: {
+                if $signed(r_ex_a) <: $signed(r_ex_b) {
+                    w_ex_alu = r_ex_a;
+                } else {
+                    w_ex_alu = r_ex_b;
+                }
+            }
+            5'd18: {
+                if r_ex_a <: r_ex_b {
+                    w_ex_alu = r_ex_a;
+                } else {
+                    w_ex_alu = r_ex_b;
+                }
+            }
+            5'd19: {
+                if $signed(r_ex_a) <: $signed(r_ex_b) {
+                    w_ex_alu = r_ex_b;
+                } else {
+                    w_ex_alu = r_ex_a;
+                }
+            }
+            5'd20: {
+                if r_ex_a <: r_ex_b {
+                    w_ex_alu = r_ex_b;
+                } else {
+                    w_ex_alu = r_ex_a;
+                }
+            }
+            5'd21: w_ex_alu = {r_ex_a[7] repeat 24, r_ex_a[7:0]};
+            5'd22: w_ex_alu = {r_ex_a[15] repeat 16, r_ex_a[15:0]};
+            5'd23: w_ex_alu = {16'b0, r_ex_a[15:0]};
+            5'd24: w_ex_alu = (r_ex_a << r_ex_b[4:0]) | (r_ex_a >> (5'd0 - r_ex_b[4:0]));
+            5'd25: w_ex_alu = (r_ex_a >> r_ex_b[4:0]) | (r_ex_a << (5'd0 - r_ex_b[4:0]));
+            5'd26: w_ex_alu = w_orc_b;
+            5'd27: w_ex_alu = {r_ex_a[7:0], r_ex_a[15:8], r_ex_a[23:16], r_ex_a[31:24]};
             default: w_ex_alu = r_ex_a + r_ex_b;
         }
         w_ex_branch_ok = false;
@@ -340,6 +407,12 @@ pub module Chrysoberyl #(
                                         case w_fetch_half[6:2] {
                                             // C.ZEXT.B
                                             5'b11000: w_fetch_inst = {12'h0ff, w_c_rd, 3'b111, w_c_rd, 7'b0010011};
+                                            // C.SEXT.B (Zbb)
+                                            5'b11001: w_fetch_inst = {7'b0110000, 5'b00100, w_c_rd, 3'b001, w_c_rd, 7'b0010011};
+                                            // C.ZEXT.H (Zbb)
+                                            5'b11010: w_fetch_inst = {7'b0000100, 5'b00000, w_c_rd, 3'b100, w_c_rd, 7'b0110011};
+                                            // C.SEXT.H (Zbb)
+                                            5'b11011: w_fetch_inst = {7'b0110000, 5'b00101, w_c_rd, 3'b001, w_c_rd, 7'b0010011};
                                             // C.NOT
                                             5'b11101: w_fetch_inst = {12'hfff, w_c_rd, 3'b100, w_c_rd, 7'b0010011};
                                             default: w_fetch_legal = false;
@@ -460,7 +533,7 @@ pub module Chrysoberyl #(
             7'b0110111: {
                 d_imm       = {r_id_inst[31:12], 12'b0};
                 d_b         = d_imm;
-                d_alu_op    = 4'd10;
+                d_alu_op    = 5'd10;
                 d_reg_write = true;
             }
             7'b0010111: {
@@ -539,50 +612,97 @@ pub module Chrysoberyl #(
                 d_b         = d_imm;
                 d_uses_rs1  = true;
                 d_reg_write = true;
-                case r_id_inst[14:12] {
-                    3'd0: d_alu_op = 0;
-                    3'd2: d_alu_op = 5;
-                    3'd3: d_alu_op = 6;
-                    3'd4: d_alu_op = 4;
-                    3'd6: d_alu_op = 3;
-                    3'd7: d_alu_op = 2;
-                    3'd1: d_alu_op = 7;
-                    3'd5: {
-                        if r_id_inst[30] {
-                            d_alu_op = 9;
-                        } else {
-                            d_alu_op = 8;
-                        }
+                if r_id_inst[31:25] == 7'b0110000 && r_id_inst[14:12] == 3'b001 {
+                    // Zbb count and sign-extension operations.
+                    case r_id_inst[24:20] {
+                        5'b00000: d_alu_op = 14; // CLZ
+                        5'b00001: d_alu_op = 15; // CTZ
+                        5'b00010: d_alu_op = 16; // CPOP
+                        5'b00100: d_alu_op = 21; // SEXT.B
+                        5'b00101: d_alu_op = 22; // SEXT.H
+                        default: d_valid = false;
                     }
-                    default: d_valid = false;
+                } else if r_id_inst[31:25] == 7'b0110000 && r_id_inst[14:12] == 3'b101 {
+                    d_b      = {27'b0, r_id_inst[24:20]};
+                    d_alu_op = 25; // RORI
+                } else if r_id_inst[31:20] == 12'b001010000111 && r_id_inst[14:12] == 3'b101 {
+                    d_alu_op = 26; // ORC.B
+                } else if r_id_inst[31:20] == 12'b011010011000 && r_id_inst[14:12] == 3'b101 {
+                    d_alu_op = 27; // REV8 (RV32 encoding)
+                } else {
+                    case r_id_inst[14:12] {
+                        3'd0: d_alu_op = 0;
+                        3'd2: d_alu_op = 5;
+                        3'd3: d_alu_op = 6;
+                        3'd4: d_alu_op = 4;
+                        3'd6: d_alu_op = 3;
+                        3'd7: d_alu_op = 2;
+                        3'd1: d_alu_op = 7;
+                        3'd5: {
+                            if r_id_inst[30] {
+                                d_alu_op = 9;
+                            } else {
+                                d_alu_op = 8;
+                            }
+                        }
+                        default: d_valid = false;
+                    }
                 }
             }
             7'b0110011: {
                 d_uses_rs1  = true;
                 d_uses_rs2  = true;
                 d_reg_write = true;
-                case r_id_inst[14:12] {
-                    3'd0: {
-                        if r_id_inst[30] {
-                            d_alu_op = 1;
-                        } else {
-                            d_alu_op = 0;
-                        }
+                if r_id_inst[31:25] == 7'b0100000 {
+                    case r_id_inst[14:12] {
+                        3'b000: d_alu_op = 1;  // SUB
+                        3'b100: d_alu_op = 13; // XNOR
+                        3'b101: d_alu_op = 9;  // SRA
+                        3'b110: d_alu_op = 12; // ORN
+                        3'b111: d_alu_op = 11; // ANDN
+                        default: d_valid = false;
                     }
-                    3'd1: d_alu_op = 7;
-                    3'd2: d_alu_op = 5;
-                    3'd3: d_alu_op = 6;
-                    3'd4: d_alu_op = 4;
-                    3'd5: {
-                        if r_id_inst[30] {
-                            d_alu_op = 9;
-                        } else {
-                            d_alu_op = 8;
-                        }
+                } else if r_id_inst[31:25] == 7'b0110000 {
+                    case r_id_inst[14:12] {
+                        3'b001: d_alu_op = 24; // ROL
+                        3'b101: d_alu_op = 25; // ROR
+                        default: d_valid = false;
                     }
-                    3'd6   : d_alu_op = 3;
-                    3'd7   : d_alu_op = 2;
-                    default: d_valid  = false;
+                } else if r_id_inst[31:25] == 7'b0000101 {
+                    case r_id_inst[14:12] {
+                        3'b100: d_alu_op = 17; // MIN
+                        3'b101: d_alu_op = 18; // MINU
+                        3'b110: d_alu_op = 19; // MAX
+                        3'b111: d_alu_op = 20; // MAXU
+                        default: d_valid = false;
+                    }
+                } else if r_id_inst[31:25] == 7'b0000100 && r_id_inst[24:20] == 0
+                    && r_id_inst[14:12] == 3'b100 {
+                    d_alu_op = 23; // ZEXT.H (RV32 encoding)
+                } else {
+                    case r_id_inst[14:12] {
+                        3'd0: {
+                            if r_id_inst[30] {
+                                d_alu_op = 1;
+                            } else {
+                                d_alu_op = 0;
+                            }
+                        }
+                        3'd1: d_alu_op = 7;
+                        3'd2: d_alu_op = 5;
+                        3'd3: d_alu_op = 6;
+                        3'd4: d_alu_op = 4;
+                        3'd5: {
+                            if r_id_inst[30] {
+                                d_alu_op = 9;
+                            } else {
+                                d_alu_op = 8;
+                            }
+                        }
+                        3'd6   : d_alu_op = 3;
+                        3'd7   : d_alu_op = 2;
+                        default: d_valid  = false;
+                    }
                 }
             }
             default: d_valid = false;

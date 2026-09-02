@@ -31,6 +31,7 @@ case "$($RISCV_CC --version 2>/dev/null | head -1)" in
 esac
 
 TESTS="add addi and andi auipc beq bge bgeu blt bltu bne jal jalr lb lbu lh lhu lui lw or ori sb sh sll slli slt slti sltiu sltu sra srai srl srli sub sw xor xori"
+ZBB_TESTS="andn clz cpop ctz max maxu min minu orc_b orn rev8 rol ror rori xnor"
 PASS=0
 FAIL=0
 
@@ -47,6 +48,23 @@ for name in $TESTS; do
         PASS=$((PASS + 1))
     else
         echo "FAIL: rv32ui-$name"
+        FAIL=$((FAIL + 1))
+    fi
+done
+
+for name in $ZBB_TESTS; do
+    object="$BUILD_DIR/bin/rv32uzbb-$name.o"
+    image="$BUILD_DIR/bin/rv32uzbb-$name.bin"
+    "$RISCV_CC" $TARGET_FLAG -march=rv32i_zbb -mabi=ilp32 -x assembler-with-cpp \
+        -Itest/riscv-tests -I"$TEST_ROOT/isa/macros/scalar" \
+        -c "$TEST_ROOT/isa/rv32uzbb/$name.S" -o "$object"
+    "$RISCV_LD" -m elf32lriscv -T test/riscv-tests/link.ld --oformat=binary \
+        "$object" -o "$image"
+    if "$BUILD_DIR/obj_dir/riscv_test_runner" "$image"; then
+        echo "PASS: rv32uzbb-$name"
+        PASS=$((PASS + 1))
+    else
+        echo "FAIL: rv32uzbb-$name"
         FAIL=$((FAIL + 1))
     fi
 done
