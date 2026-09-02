@@ -1,4 +1,4 @@
-/// Chrysoberyl is a compact, in-order RV32IC_Zbb_Zcb processor ported from Alexandrite.
+/// Chrysoberyl is a compact, in-order RV32IC_Zba_Zbb_Zcb processor ported from Alexandrite.
 ///
 /// The core has the same Harvard-style instruction/data memory interface as
 /// Alexandrite.  Both memories are combinational-read; writes are committed by
@@ -83,6 +83,7 @@ pub module Chrysoberyl #(
     var d_wb_sel      : logic<2> ;
     var d_uses_rs1    : logic    ;
     var d_uses_rs2    : logic    ;
+    var d_zba_shift   : logic<2> ;
     var d_imm         : logic<32>;
     var d_pc          : logic<32>;
     var d_jump_addr   : logic<32>;
@@ -527,6 +528,7 @@ pub module Chrysoberyl #(
         d_wb_sel       = 0;
         d_uses_rs1     = false;
         d_uses_rs2     = false;
+        d_zba_shift    = 0;
         d_imm          = 0;
         d_pc           = r_id_pc as 32;
         case r_id_inst[6:0] {
@@ -668,6 +670,14 @@ pub module Chrysoberyl #(
                         3'b101: d_alu_op = 25; // ROR
                         default: d_valid = false;
                     }
+                } else if r_id_inst[31:25] == 7'b0010000 {
+                    // Zba fixed-shift address generation reuses the adder.
+                    case r_id_inst[14:12] {
+                        3'b010: d_zba_shift = 1; // SH1ADD
+                        3'b100: d_zba_shift = 2; // SH2ADD
+                        3'b110: d_zba_shift = 3; // SH3ADD
+                        default: d_valid = false;
+                    }
                 } else if r_id_inst[31:25] == 7'b0000101 {
                     case r_id_inst[14:12] {
                         3'b100: d_alu_op = 17; // MIN
@@ -744,6 +754,10 @@ pub module Chrysoberyl #(
             if r_id_inst[6:0] == 7'b0110011 || r_id_inst[6:0] == 7'b1100011 {
                 d_b = w_wb_data;
             }
+        }
+        // Apply the Zba shift after bypassing so forwarded rs1 values are used.
+        if d_zba_shift != 0 {
+            d_a = d_a << d_zba_shift;
         }
         // Branches compare registers but use the instruction PC as their target base.
         // JALR additionally clears bit 0 as required by the RV32I specification.

@@ -1,7 +1,7 @@
 # Chrysoberyl
 
 Chrysoberyl is a Veryl port of [Alexandrite](../Alexandrite), a small in-order
-RV32IC_Zbb_Zcb CPU. It retains Alexandrite's instruction ROM and byte-enable RAM
+RV32IC_Zba_Zbb_Zcb CPU. It retains Alexandrite's instruction ROM and byte-enable RAM
 interfaces (including its byte-addressed RAM address port), exposes all 32
 integer registers for simulation, and raises
 `o_finish` after a non-zero store to address `0x4`.
@@ -12,7 +12,9 @@ RV32C compressed-instruction extension, including mixed 16/32-bit streams and
 branches, jumps, loads, stores, `LUI`, and `AUIPC` are supported. CSR and
 system instructions remain intentionally outside Alexandrite's scope.
 
-The RV32 Zbb basic bit-manipulation extension provides logical-with-negate,
+The RV32 Zba address-generation extension provides one-cycle shift-and-add
+instructions for array and structure indexing. The Zbb basic bit-manipulation
+extension provides logical-with-negate,
 count, min/max, sign/zero-extension, rotate, OR-combine, and byte-reverse
 instructions. All Zbb operations execute in one cycle.
 
@@ -49,7 +51,7 @@ veryl build
 
 Generated SystemVerilog is placed in `target/`.
 
-Run the included smoke test plus directed RV32I, Zbb, RV32C, and Zcb instruction tests with:
+Run the included smoke test plus directed RV32I, Zba, Zbb, RV32C, and Zcb instruction tests with:
 
 ```sh
 sh test/run_smoke.sh
@@ -64,8 +66,9 @@ repository is pinned as a Git submodule. Initialize it after cloning with:
 git submodule update --init
 ```
 
-Run the 37 unprivileged `rv32ui` tests, 15 upstream `rv32uzbb` tests, and the
-upstream `rv32uc` compressed-instruction test with:
+Run the 37 unprivileged `rv32ui` tests, three upstream `rv32uzba` tests, 15
+upstream `rv32uzbb` tests, and the upstream `rv32uc` compressed-instruction
+test with:
 
 ```sh
 sh test/run_riscv_tests.sh
