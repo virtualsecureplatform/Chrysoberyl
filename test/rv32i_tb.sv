@@ -37,13 +37,13 @@ module rv32i_tb;
     always #5 clk = ~clk;
     always_comb begin
         rom_data = rom[rom_addr];
-        ram_read_data = ram[ram_addr];
+        ram_read_data = ram[ram_addr[9:2]];
     end
     always_ff @(posedge clk) begin
-        if (ram_we[0]) ram[ram_addr][7:0]   <= ram_write_data[7:0];
-        if (ram_we[1]) ram[ram_addr][15:8]  <= ram_write_data[15:8];
-        if (ram_we[2]) ram[ram_addr][23:16] <= ram_write_data[23:16];
-        if (ram_we[3]) ram[ram_addr][31:24] <= ram_write_data[31:24];
+        if (ram_we[0]) ram[ram_addr[9:2]][7:0]   <= ram_write_data[7:0];
+        if (ram_we[1]) ram[ram_addr[9:2]][15:8]  <= ram_write_data[15:8];
+        if (ram_we[2]) ram[ram_addr[9:2]][23:16] <= ram_write_data[23:16];
+        if (ram_we[3]) ram[ram_addr[9:2]][31:24] <= ram_write_data[31:24];
     end
 
     initial begin
@@ -95,8 +95,9 @@ module rv32i_tb;
         #2 rst = 0;
         #10 rst = 1;
         repeat (100) @(posedge clk);
-        if (!finish || ram[0] !== 10 || ram[4] !== 5) $fatal(1, "memory/finish failure: finish=%b ram0=%h ram4=%h", finish, ram[0], ram[4]);
-        if (dut.r_x[3] !== 10 || dut.r_x[4] !== 8 || dut.r_x[5] !== 1 || dut.r_x[6] !== 0 || dut.r_x[7] !== 8 || dut.r_x[8] !== 10 || dut.r_x[9] !== 2) $fatal(1, "integer ALU failure");
+        if (!finish || ram[0] !== 10 || ram[1] !== 5) $fatal(1, "memory/finish failure: finish=%b ram0=%h ram1=%h", finish, ram[0], ram[1]);
+        if (dut.r_x[3] !== 10 || dut.r_x[4] !== 8 || dut.r_x[5] !== 1 || dut.r_x[6] !== 0 || dut.r_x[7] !== 8 || dut.r_x[8] !== 10 || dut.r_x[9] !== 2)
+            $fatal(1, "integer ALU failure: x3=%h x4=%h x5=%h x6=%h x7=%h x8=%h x9=%h", dut.r_x[3], dut.r_x[4], dut.r_x[5], dut.r_x[6], dut.r_x[7], dut.r_x[8], dut.r_x[9]);
         if (dut.r_x[10] !== 160 || dut.r_x[11] !== 5 || dut.r_x[12] !== 32'hffff_ffff || dut.r_x[13] !== 32'h1234_5000 || dut.r_x[14] !== 32'h0000_1034) $fatal(1, "shift/U-type failure");
         if (dut.r_x[15] !== 10 || dut.r_x[16] !== 8 || dut.r_x[17] !== 32'hffff_fffd || dut.r_x[18] !== 8 || dut.r_x[19] !== 253) $fatal(1, "load failure");
         if (dut.r_x[20] !== 7 || dut.r_x[21] !== 8 || dut.r_x[22] !== 0 || dut.r_x[23] !== 9 || dut.r_x[24] !== 144 || dut.r_x[25] !== 10 || dut.r_x[27] !== 160 || dut.r_x[28] !== 11) $fatal(1, "control-flow failure");

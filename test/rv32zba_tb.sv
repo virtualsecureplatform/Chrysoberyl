@@ -21,13 +21,13 @@ module rv32zba_tb;
     always #5 clk = ~clk;
     always_comb begin
         rom_data = rom[rom_addr];
-        ram_read_data = ram[ram_addr];
+        ram_read_data = ram[ram_addr[9:2]];
     end
     always_ff @(posedge clk) begin
-        if (ram_we[0]) ram[ram_addr][7:0]   <= ram_write_data[7:0];
-        if (ram_we[1]) ram[ram_addr][15:8]  <= ram_write_data[15:8];
-        if (ram_we[2]) ram[ram_addr][23:16] <= ram_write_data[23:16];
-        if (ram_we[3]) ram[ram_addr][31:24] <= ram_write_data[31:24];
+        if (ram_we[0]) ram[ram_addr[9:2]][7:0]   <= ram_write_data[7:0];
+        if (ram_we[1]) ram[ram_addr[9:2]][15:8]  <= ram_write_data[15:8];
+        if (ram_we[2]) ram[ram_addr[9:2]][23:16] <= ram_write_data[23:16];
+        if (ram_we[3]) ram[ram_addr[9:2]][31:24] <= ram_write_data[31:24];
     end
 
     initial begin

@@ -1,4 +1,4 @@
-#include <Vchrysoberyl_Chrysoberyl.h>
+#include <Vchrysoberyl_ChrysoberylCore.h>
 #include <verilated.h>
 
 #include <array>
@@ -53,13 +53,13 @@ bool load_image(const std::string& path) {
     return true;
 }
 
-void drive_memory(Vchrysoberyl_Chrysoberyl& dut) {
+void drive_memory(Vchrysoberyl_ChrysoberylCore& dut) {
     dut.i_rom_data = rom[dut.o_rom_addr % rom.size()];
     const auto ram_word = (dut.o_ram_addr >> 2) % ram.size();
     dut.i_ram_read_data = ram[ram_word];
 }
 
-void cycle(Vchrysoberyl_Chrysoberyl& dut) {
+void cycle(Vchrysoberyl_ChrysoberylCore& dut) {
     dut.i_clk = 0;
     drive_memory(dut);
     dut.eval();
@@ -90,7 +90,7 @@ int main(int argc, char** argv) {
     if (!load_image(argv[1])) return 2;
 
     Verilated::commandArgs(argc, argv);
-    Vchrysoberyl_Chrysoberyl dut;
+    Vchrysoberyl_ChrysoberylCore dut;
     dut.i_rst = 0;
     cycle(dut);
     dut.i_rst = 1;

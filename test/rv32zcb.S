@@ -52,12 +52,6 @@ _start:
     c.zext.h    x10
     c.sext.h    x11
 
-    # C.MUL still requires M or Zmmul and remains an illegal bubble.
-    .2byte      0x9e55      # c.mul x12, x13
-
-    # C.SH requires encoding bit 6 to be zero. This reserved variant must not store.
-    .2byte      0x8f40
-
     li          x5, 1
     sw          x5, 4(x0)
 1:

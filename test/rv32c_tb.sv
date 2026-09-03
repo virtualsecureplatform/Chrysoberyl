@@ -21,13 +21,13 @@ module rv32c_tb;
     always #5 clk = ~clk;
     always_comb begin
         rom_data = rom[rom_addr];
-        ram_read_data = ram[ram_addr];
+        ram_read_data = ram[ram_addr[9:2]];
     end
     always_ff @(posedge clk) begin
-        if (ram_we[0]) ram[ram_addr][7:0]   <= ram_write_data[7:0];
-        if (ram_we[1]) ram[ram_addr][15:8]  <= ram_write_data[15:8];
-        if (ram_we[2]) ram[ram_addr][23:16] <= ram_write_data[23:16];
-        if (ram_we[3]) ram[ram_addr][31:24] <= ram_write_data[31:24];
+        if (ram_we[0]) ram[ram_addr[9:2]][7:0]   <= ram_write_data[7:0];
+        if (ram_we[1]) ram[ram_addr[9:2]][15:8]  <= ram_write_data[15:8];
+        if (ram_we[2]) ram[ram_addr[9:2]][23:16] <= ram_write_data[23:16];
+        if (ram_we[3]) ram[ram_addr[9:2]][31:24] <= ram_write_data[31:24];
     end
 
     initial begin
@@ -37,8 +37,8 @@ module rv32c_tb;
         #2 rst = 0;
         #10 rst = 1;
         repeat (100) @(posedge clk);
-        if (!finish || ram[4] !== 4 || ram[16] !== 4 || ram[32] !== 32'h1000)
-            $fatal(1, "RV32C memory failure: finish=%b ram4=%h ram16=%h ram32=%h", finish, ram[4], ram[16], ram[32]);
+        if (!finish || ram[1] !== 4 || ram[4] !== 4 || ram[8] !== 32'h1000)
+            $fatal(1, "RV32C memory failure: finish=%b ram1=%h ram4=%h ram8=%h", finish, ram[1], ram[4], ram[8]);
         if (dut.r_x[8] !== 4 || dut.r_x[9] !== 6 || dut.r_x[10] !== 4 || dut.r_x[11] !== 4)
             $fatal(1, "RV32C compact-register ALU/load/store failure: x8=%h x9=%h x10=%h x11=%h", dut.r_x[8], dut.r_x[9], dut.r_x[10], dut.r_x[11]);
         if (dut.r_x[2] !== 32 || dut.r_x[12] !== 32'h1000 || dut.r_x[13] !== 32'h1000 || dut.r_x[14] !== 32'h1004)

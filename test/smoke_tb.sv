@@ -8,13 +8,12 @@ module smoke_tb;
     logic [31:0] ram_write_data;
     logic [3:0] ram_we;
     logic finish;
-    logic [31:0] x [32];
     logic [31:0] ram [1024];
 
-    chrysoberyl_Chrysoberyl dut (
+    chrysoberyl_ChrysoberylCore dut (
         .i_clk(clk), .i_rst(rst), .i_rom_data(rom_data), .o_rom_addr(rom_addr),
         .i_ram_read_data(ram_read_data), .o_ram_addr(ram_addr),
-        .o_ram_write_data(ram_write_data), .o_ram_we(ram_we), .o_finish(finish), .o_x(x)
+        .o_ram_write_data(ram_write_data), .o_ram_we(ram_we)
     );
 
     always #5 clk = ~clk;
@@ -25,13 +24,14 @@ module smoke_tb;
             2: rom_data = 32'h0020_2223; // sw   x2, 4(x0)
             default: rom_data = 32'h0000_0013;
         endcase
-        ram_read_data = ram[ram_addr];
+        ram_read_data = ram[ram_addr[9:2]];
     end
     always_ff @(posedge clk) begin
-        if (ram_we[0]) ram[ram_addr][7:0]   <= ram_write_data[7:0];
-        if (ram_we[1]) ram[ram_addr][15:8]  <= ram_write_data[15:8];
-        if (ram_we[2]) ram[ram_addr][23:16] <= ram_write_data[23:16];
-        if (ram_we[3]) ram[ram_addr][31:24] <= ram_write_data[31:24];
+        if (ram_we[0]) ram[ram_addr[9:2]][7:0]   <= ram_write_data[7:0];
+        if (ram_we[1]) ram[ram_addr[9:2]][15:8]  <= ram_write_data[15:8];
+        if (ram_we[2]) ram[ram_addr[9:2]][23:16] <= ram_write_data[23:16];
+        if (ram_we[3]) ram[ram_addr[9:2]][31:24] <= ram_write_data[31:24];
+        if (ram_we != 0 && ram_addr == 4) finish <= 1;
     end
 
     initial begin
@@ -39,7 +39,8 @@ module smoke_tb;
         #2 rst = 0;
         #10 rst = 1;
         repeat (12) @(posedge clk);
-        if (!finish || ram[4] !== 12 || dut.r_x[1] !== 5 || dut.r_x[2] !== 12) $fatal(1, "RV32I smoke test failed: finish=%b ram[4]=%h x1=%h x2=%h", finish, ram[4], dut.r_x[1], dut.r_x[2]);
+        if (!finish || ram[1] !== 12)
+            $fatal(1, "RV32I lean-core smoke test failed: finish=%b ram[1]=%h", finish, ram[1]);
         $display("PASS: Chrysoberyl RV32I smoke test");
         $finish;
     end

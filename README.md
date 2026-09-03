@@ -6,11 +6,25 @@ interfaces (including its byte-addressed RAM address port), exposes all 32
 integer registers for simulation, and raises
 `o_finish` after a non-zero store to address `0x4`.
 
+`Chrysoberyl` remains the backward-compatible simulation/debug top.
+`ChrysoberylCore` is the recommended synthesis wrapper and omits the
+register-file and finish outputs so unused debug logic can be optimized away.
+The lean core leaves x1-x31 undefined after reset; software must initialize
+registers before reading them. Register x0 remains hardwired to zero.
+
 The current implementation supports the Alexandrite RV32I subset plus the
 RV32C compressed-instruction extension, including mixed 16/32-bit streams and
 32-bit instructions that cross a ROM-word boundary. Integer arithmetic,
 branches, jumps, loads, stores, `LUI`, and `AUIPC` are supported. CSR and
 system instructions remain intentionally outside Alexandrite's scope.
+Unsupported and reserved instruction encodings have undefined behavior; they
+are not guaranteed to trap, become no-ops, or avoid architectural side effects.
+
+Data-memory accesses must be naturally aligned: halfword addresses require
+bit 0 to be zero, and word addresses require bits `[1:0]` to be zero. This
+includes the Zcb `c.lh`, `c.lhu`, and `c.sh` instructions; byte accesses may
+use any address. Misaligned data accesses are unsupported and do not raise a
+trap because the core has no exception interface.
 
 The RV32 Zba address-generation extension provides one-cycle shift-and-add
 instructions for array and structure indexing. The Zbb basic bit-manipulation
@@ -21,7 +35,8 @@ instructions. All Zbb operations execute in one cycle.
 For the current RV32IC_Zbb configuration, the Zcb code-size extension adds
 `c.lbu`, `c.lhu`, `c.lh`, `c.sb`, `c.sh`, `c.zext.b`, and `c.not`. The
 Zbb-dependent `c.sext.b`, `c.zext.h`, and `c.sext.h` instructions are also
-supported. `c.mul` requires M or Zmmul, so that encoding remains illegal.
+supported. `c.mul` requires M or Zmmul and is therefore unsupported, with the
+same undefined behavior as every other unsupported encoding.
 
 The instruction address space defaults to 16 KiB. Set the elaboration-time
 `ROM_SIZE_BYTES` module parameter to another power-of-two byte size when a

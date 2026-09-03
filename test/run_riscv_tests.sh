@@ -21,7 +21,7 @@ fi
 
 mkdir -p "$BUILD_DIR/bin"
 "$VERYL" build
-verilator -Wno-fatal --cc --exe --build --top-module chrysoberyl_Chrysoberyl \
+verilator -Wno-fatal --cc --exe --build --top-module chrysoberyl_ChrysoberylCore \
     --Mdir "$BUILD_DIR/obj_dir" -o riscv_test_runner \
     "$(pwd)/target/chrysoberyl.sv" "$(pwd)/test/riscv-tests/sim_riscv_test.cpp"
 
