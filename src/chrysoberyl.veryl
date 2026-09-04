@@ -116,7 +116,9 @@ pub module Chrysoberyl #(
     var w_c_imm       : logic<32>;
     var w_c_rd        : logic<5> ;
     var w_fetch_pc    : logic<32>;
-    var w_fetch_target: logic<32>;
+    var w_fetch_target: logic<ROM_ADDRESS_WIDTH>;
+    var w_pc_plus2    : logic<ROM_ADDRESS_WIDTH>;
+    var w_pc_plus_len : logic<ROM_ADDRESS_WIDTH>;
     var w_fetch_pred_taken: logic;
     var w_fetch_ctrl_imm: logic<32>;
     var w_fetch_bht_index: logic<6>;
@@ -229,6 +231,54 @@ pub module Chrysoberyl #(
             ret[33] = a[31];
         } else {
             ret[33] = ret[31];
+        }
+        return ret;
+    }
+
+    /// Width-limited prefix adder for fetch addresses. All PC results wrap at
+    /// ROM_SIZE_BYTES, so carrying a full 32-bit target only adds dead logic.
+    function add_pc_prefix (
+        a: input logic<ROM_ADDRESS_WIDTH>,
+        b: input logic<ROM_ADDRESS_WIDTH>,
+    ) -> logic<ROM_ADDRESS_WIDTH> {
+        var bit_p: logic<ROM_ADDRESS_WIDTH>;
+        var g0   : logic<ROM_ADDRESS_WIDTH>;
+        var p1   : logic<ROM_ADDRESS_WIDTH>;
+        var g1   : logic<ROM_ADDRESS_WIDTH>;
+        var p2   : logic<ROM_ADDRESS_WIDTH>;
+        var g2   : logic<ROM_ADDRESS_WIDTH>;
+        var p4   : logic<ROM_ADDRESS_WIDTH>;
+        var g4   : logic<ROM_ADDRESS_WIDTH>;
+        var g8   : logic<ROM_ADDRESS_WIDTH>;
+        var ret  : logic<ROM_ADDRESS_WIDTH>;
+
+        bit_p = a ^ b;
+        g0 = a & b;
+        p1 = bit_p;
+        g1 = g0;
+        for i in 1..ROM_ADDRESS_WIDTH {
+            p1[i] = bit_p[i] & bit_p[i - 1];
+            g1[i] = g0[i] | (bit_p[i] & g0[i - 1]);
+        }
+        p2 = p1;
+        g2 = g1;
+        for i in 2..ROM_ADDRESS_WIDTH {
+            p2[i] = p1[i] & p1[i - 2];
+            g2[i] = g1[i] | (p1[i] & g1[i - 2]);
+        }
+        p4 = p2;
+        g4 = g2;
+        for i in 4..ROM_ADDRESS_WIDTH {
+            p4[i] = p2[i] & p2[i - 4];
+            g4[i] = g2[i] | (p2[i] & g2[i - 4]);
+        }
+        g8 = g4;
+        for i in 8..ROM_ADDRESS_WIDTH {
+            g8[i] = g4[i] | (p4[i] & g4[i - 8]);
+        }
+        ret[0] = bit_p[0];
+        for i in 1..ROM_ADDRESS_WIDTH {
+            ret[i] = bit_p[i] ^ g8[i - 1];
         }
         return ret;
     }
@@ -637,13 +687,19 @@ pub module Chrysoberyl #(
         w_fetch_is_jump   = false;
         if w_fetch_inst[6:0] == 7'b1100011 {
             w_fetch_ctrl_imm = {w_fetch_inst[31] repeat 20, w_fetch_inst[7], w_fetch_inst[30:25], w_fetch_inst[11:8], 1'b0};
-            w_fetch_target = w_fetch_pc + w_fetch_ctrl_imm;
             w_fetch_is_branch = true;
         } else if w_fetch_inst[6:0] == 7'b1101111 {
             w_fetch_ctrl_imm = {w_fetch_inst[31] repeat 12, w_fetch_inst[19:12], w_fetch_inst[20], w_fetch_inst[30:21], 1'b0};
-            w_fetch_target = w_fetch_pc + w_fetch_ctrl_imm;
             w_fetch_is_jump = true;
         }
+        w_fetch_target = add_pc_prefix(
+            w_fetch_pc[ROM_ADDRESS_WIDTH - 1:0],
+            w_fetch_ctrl_imm[ROM_ADDRESS_WIDTH - 1:0],
+        );
+        // Share each distinct sequential advance rather than rebuilding it in
+        // every arm of the next-PC priority logic.
+        w_pc_plus2 = add_pc_prefix(r_pc, 2 as ROM_ADDRESS_WIDTH);
+        w_pc_plus_len = add_pc_prefix(r_pc, w_fetch_len as ROM_ADDRESS_WIDTH);
     }
 
     always_comb {
@@ -1074,9 +1130,9 @@ pub module Chrysoberyl #(
                     r_id_pred_taken = w_fetch_pred_taken;
                     r_id_bht_index = w_fetch_bht_index;
                     if w_fetch_pred_taken {
-                        r_pc = w_fetch_target[ROM_ADDRESS_WIDTH - 1:0];
+                        r_pc = w_fetch_target;
                     } else {
-                        r_pc = r_pc + (2 as ROM_ADDRESS_WIDTH);
+                        r_pc = w_pc_plus2;
                     }
                     r_fetch_cross = false;
                 } else if r_pc[1] && w_fetch_half[1:0] == 2'b11 {
@@ -1088,7 +1144,7 @@ pub module Chrysoberyl #(
                     r_fetch_low16  = w_fetch_half;
                     r_fetch_pc     = r_pc;
                     r_fetch_cross  = true;
-                    r_pc           = r_pc + (2 as ROM_ADDRESS_WIDTH);
+                    r_pc           = w_pc_plus2;
                 } else {
                     r_id_inst = w_fetch_inst;
                     r_id_pc   = r_pc;
@@ -1096,9 +1152,9 @@ pub module Chrysoberyl #(
                     r_id_pred_taken = w_fetch_pred_taken;
                     r_id_bht_index = w_fetch_bht_index;
                     if w_fetch_pred_taken {
-                        r_pc = w_fetch_target[ROM_ADDRESS_WIDTH - 1:0];
+                        r_pc = w_fetch_target;
                     } else {
-                        r_pc = r_pc + (w_fetch_len as ROM_ADDRESS_WIDTH);
+                        r_pc = w_pc_plus_len;
                     }
                 }
             }
