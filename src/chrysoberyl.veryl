@@ -87,7 +87,11 @@ pub module Chrysoberyl #(
     var d_jump_addr   : logic<32>;
 
     var w_ex_alu      : logic<32>;
+    var w_ex_arithmetic: logic<34>;
     var w_ex_add_sub  : logic<32>;
+    var w_ex_subtract : logic    ;
+    var w_ex_signed_lt: logic    ;
+    var w_ex_unsigned_lt: logic  ;
     var w_ex_branch_ok: logic    ;
     var w_ex_control  : logic    ;
     var w_ex_taken    : logic    ;
@@ -152,14 +156,15 @@ pub module Chrysoberyl #(
         return ret;
     }
 
-    /// Shared 32-bit Kogge-Stone add/subtract datapath. Subtraction uses
-    /// a + ~b + 1, so ADD and SUB share every prefix stage instead of
-    /// synthesizing independent arithmetic networks.
+    /// Shared 32-bit Kogge-Stone arithmetic datapath. Subtraction uses
+    /// a + ~b + 1. When subtraction is selected, bits 32 and 33 return
+    /// unsigned and signed less-than, allowing ADD, SUB, comparisons,
+    /// MIN/MAX, and branches to share the tree.
     function add_sub_prefix (
         a       : input logic<32>,
         b       : input logic<32>,
         subtract: input logic,
-    ) -> logic<32> {
+    ) -> logic<34> {
         var b_effective: logic<32>;
         var bit_p      : logic<32>;
         var g0         : logic<32>;
@@ -172,7 +177,7 @@ pub module Chrysoberyl #(
         var prop8      : logic<32>;
         var gen8       : logic<32>;
         var gen16      : logic<32>;
-        var ret        : logic<32>;
+        var ret        : logic<34>;
 
         b_effective = b ^ {subtract repeat 32};
         bit_p = a ^ b_effective;
@@ -216,6 +221,14 @@ pub module Chrysoberyl #(
         ret[0] = bit_p[0] ^ subtract;
         for i in 1..32 {
             ret[i] = bit_p[i] ^ gen16[i - 1];
+        }
+        // A carry out means no borrow for unsigned subtraction.
+        ret[32] = ~gen16[31];
+        // Opposite-sign operands cannot overflow this signed comparison.
+        if a[31] != b[31] {
+            ret[33] = a[31];
+        } else {
+            ret[33] = ret[31];
         }
         return ret;
     }
@@ -318,31 +331,26 @@ pub module Chrysoberyl #(
         if r_ex_a[23:16] != 0 { w_orc_b[23:16] = 8'hff; }
         if r_ex_a[31:24] != 0 { w_orc_b[31:24] = 8'hff; }
 
-        // Execute stage. Operations 11 through 27 implement RV32 Zbb.
-        w_ex_add_sub = add_sub_prefix(
+        // Execute stage. Operations 11 through 30 include RV32 Zbb.
+        // Opcodes 24 through 31 all consume subtraction or its comparison flags.
+        // Keeping this as a two-bit decode avoids placing a priority tree in
+        // front of every bit of the shared arithmetic datapath.
+        w_ex_subtract = r_ex_alu_op[4] && r_ex_alu_op[3];
+        w_ex_arithmetic = add_sub_prefix(
             r_ex_a,
             r_ex_b,
-            r_ex_alu_op == 5'd1,
+            w_ex_subtract,
         );
+        w_ex_add_sub = w_ex_arithmetic[31:0];
+        w_ex_unsigned_lt = w_ex_arithmetic[32];
+        w_ex_signed_lt = w_ex_arithmetic[33];
         case r_ex_alu_op {
-            5'd1: w_ex_alu = w_ex_add_sub;
+            5'd1: w_ex_alu = (r_ex_a << r_ex_b[4:0]) | (r_ex_a >> (5'd0 - r_ex_b[4:0]));
             5'd2: w_ex_alu = r_ex_a & r_ex_b;
             5'd3: w_ex_alu = r_ex_a | r_ex_b;
             5'd4: w_ex_alu = r_ex_a ^ r_ex_b;
-            5'd5: {
-                if $signed(r_ex_a) <: $signed(r_ex_b) {
-                    w_ex_alu = 1;
-                } else {
-                    w_ex_alu = 0;
-                }
-            }
-            5'd6: {
-                if r_ex_a <: r_ex_b {
-                    w_ex_alu = 1;
-                } else {
-                    w_ex_alu = 0;
-                }
-            }
+            5'd5: w_ex_alu = (r_ex_a >> r_ex_b[4:0]) | (r_ex_a << (5'd0 - r_ex_b[4:0]));
+            5'd6: w_ex_alu = w_orc_b;
             5'd7 : w_ex_alu = r_ex_a << r_ex_b[4:0];
             5'd8 : w_ex_alu = r_ex_a >> r_ex_b[4:0];
             5'd9 : w_ex_alu = $signed(r_ex_a) >>> r_ex_b[4:0];
@@ -353,29 +361,33 @@ pub module Chrysoberyl #(
             5'd14: w_ex_alu = w_count_leading;
             5'd15: w_ex_alu = w_count_trailing;
             5'd16: w_ex_alu = w_population_count;
-            5'd17: {
-                if $signed(r_ex_a) <: $signed(r_ex_b) {
+            5'd17: w_ex_alu = {r_ex_a[7:0], r_ex_a[15:8], r_ex_a[23:16], r_ex_a[31:24]};
+            5'd24: w_ex_alu = w_ex_add_sub;
+            5'd25: w_ex_alu = {31'b0, w_ex_signed_lt};
+            5'd26: w_ex_alu = {31'b0, w_ex_unsigned_lt};
+            5'd27: {
+                if w_ex_signed_lt {
                     w_ex_alu = r_ex_a;
                 } else {
                     w_ex_alu = r_ex_b;
                 }
             }
-            5'd18: {
-                if r_ex_a <: r_ex_b {
+            5'd28: {
+                if w_ex_unsigned_lt {
                     w_ex_alu = r_ex_a;
                 } else {
                     w_ex_alu = r_ex_b;
                 }
             }
-            5'd19: {
-                if $signed(r_ex_a) <: $signed(r_ex_b) {
+            5'd29: {
+                if w_ex_signed_lt {
                     w_ex_alu = r_ex_b;
                 } else {
                     w_ex_alu = r_ex_a;
                 }
             }
-            5'd20: {
-                if r_ex_a <: r_ex_b {
+            5'd30: {
+                if w_ex_unsigned_lt {
                     w_ex_alu = r_ex_b;
                 } else {
                     w_ex_alu = r_ex_a;
@@ -384,20 +396,16 @@ pub module Chrysoberyl #(
             5'd21: w_ex_alu = {r_ex_a[7] repeat 24, r_ex_a[7:0]};
             5'd22: w_ex_alu = {r_ex_a[15] repeat 16, r_ex_a[15:0]};
             5'd23: w_ex_alu = {16'b0, r_ex_a[15:0]};
-            5'd24: w_ex_alu = (r_ex_a << r_ex_b[4:0]) | (r_ex_a >> (5'd0 - r_ex_b[4:0]));
-            5'd25: w_ex_alu = (r_ex_a >> r_ex_b[4:0]) | (r_ex_a << (5'd0 - r_ex_b[4:0]));
-            5'd26: w_ex_alu = w_orc_b;
-            5'd27: w_ex_alu = {r_ex_a[7:0], r_ex_a[15:8], r_ex_a[23:16], r_ex_a[31:24]};
             default: w_ex_alu = w_ex_add_sub;
         }
         w_ex_branch_ok = false;
         case r_ex_branch {
             3'd1   : w_ex_branch_ok = r_ex_a == r_ex_b;
             3'd2   : w_ex_branch_ok = r_ex_a != r_ex_b;
-            3'd3   : w_ex_branch_ok = $signed(r_ex_a) <: $signed(r_ex_b);
-            3'd4   : w_ex_branch_ok = $signed(r_ex_a) >= $signed(r_ex_b);
-            3'd5   : w_ex_branch_ok = r_ex_a <: r_ex_b;
-            3'd6   : w_ex_branch_ok = r_ex_a >= r_ex_b;
+            3'd3   : w_ex_branch_ok = w_ex_signed_lt;
+            3'd4   : w_ex_branch_ok = !w_ex_signed_lt;
+            3'd5   : w_ex_branch_ok = w_ex_unsigned_lt;
+            3'd6   : w_ex_branch_ok = !w_ex_unsigned_lt;
             default: w_ex_branch_ok = false;
         }
         w_ex_control = r_ex_valid && (r_ex_branch != 0 || r_ex_wb_sel == 2'd2);
@@ -405,7 +413,14 @@ pub module Chrysoberyl #(
             || (r_ex_branch == 0 && r_ex_wb_sel == 2'd2));
         w_ex_redirect = w_ex_control && (w_ex_taken != r_ex_pred_taken);
         if w_ex_taken {
-            w_ex_redirect_addr = r_ex_jump_addr;
+            if r_ex_branch != 0 {
+                w_ex_redirect_addr = r_ex_jump_addr;
+            } else {
+                // JAL and JALR already put their base and immediate on the
+                // shared arithmetic datapath. Reuse that result as the target;
+                // clearing bit 0 is required by JALR and is a no-op for JAL.
+                w_ex_redirect_addr = {w_ex_add_sub[31:1], 1'b0};
+            }
         } else {
             w_ex_redirect_addr = r_ex_pc4;
         }
@@ -685,6 +700,8 @@ pub module Chrysoberyl #(
                 d_b        = d_imm;
                 d_uses_rs1 = true;
                 d_uses_rs2 = true;
+                // Branch comparisons use the shared subtraction flags.
+                d_alu_op   = 5'd31;
                 case r_id_inst[14:12] {
                     3'd0   : d_branch = 1;
                     3'd1   : d_branch = 2;
@@ -747,16 +764,16 @@ pub module Chrysoberyl #(
                     }
                 } else if r_id_inst[31:25] == 7'b0110000 && r_id_inst[14:12] == 3'b101 {
                     d_b      = {27'b0, r_id_inst[24:20]};
-                    d_alu_op = 25; // RORI
+                    d_alu_op = 5; // RORI
                 } else if r_id_inst[31:20] == 12'b001010000111 && r_id_inst[14:12] == 3'b101 {
-                    d_alu_op = 26; // ORC.B
+                    d_alu_op = 6; // ORC.B
                 } else if r_id_inst[31:20] == 12'b011010011000 && r_id_inst[14:12] == 3'b101 {
-                    d_alu_op = 27; // REV8 (RV32 encoding)
+                    d_alu_op = 17; // REV8 (RV32 encoding)
                 } else {
                     case r_id_inst[14:12] {
                         3'd0: d_alu_op = 0;
-                        3'd2: d_alu_op = 5;
-                        3'd3: d_alu_op = 6;
+                        3'd2: d_alu_op = 25;
+                        3'd3: d_alu_op = 26;
                         3'd4: d_alu_op = 4;
                         3'd6: d_alu_op = 3;
                         3'd7: d_alu_op = 2;
@@ -778,7 +795,7 @@ pub module Chrysoberyl #(
                 d_reg_write = true;
                 if r_id_inst[31:25] == 7'b0100000 {
                     case r_id_inst[14:12] {
-                        3'b000: d_alu_op = 1;  // SUB
+                        3'b000: d_alu_op = 24; // SUB
                         3'b100: d_alu_op = 13; // XNOR
                         3'b101: d_alu_op = 9;  // SRA
                         3'b110: d_alu_op = 12; // ORN
@@ -787,8 +804,8 @@ pub module Chrysoberyl #(
                     }
                 } else if r_id_inst[31:25] == 7'b0110000 {
                     case r_id_inst[14:12] {
-                        3'b001: d_alu_op = 24; // ROL
-                        3'b101: d_alu_op = 25; // ROR
+                        3'b001: d_alu_op = 1; // ROL
+                        3'b101: d_alu_op = 5; // ROR
                         default: d_alu_op = 0;
                     }
                 } else if r_id_inst[31:25] == 7'b0010000 {
@@ -801,10 +818,10 @@ pub module Chrysoberyl #(
                     }
                 } else if r_id_inst[31:25] == 7'b0000101 {
                     case r_id_inst[14:12] {
-                        3'b100: d_alu_op = 17; // MIN
-                        3'b101: d_alu_op = 18; // MINU
-                        3'b110: d_alu_op = 19; // MAX
-                        3'b111: d_alu_op = 20; // MAXU
+                        3'b100: d_alu_op = 27; // MIN
+                        3'b101: d_alu_op = 28; // MINU
+                        3'b110: d_alu_op = 29; // MAX
+                        3'b111: d_alu_op = 30; // MAXU
                         default: d_alu_op = 0;
                     }
                 } else if r_id_inst[31:25] == 7'b0000100 && r_id_inst[24:20] == 0
@@ -814,14 +831,14 @@ pub module Chrysoberyl #(
                     case r_id_inst[14:12] {
                         3'd0: {
                             if r_id_inst[30] {
-                                d_alu_op = 1;
+                                d_alu_op = 24;
                             } else {
                                 d_alu_op = 0;
                             }
                         }
                         3'd1: d_alu_op = 7;
-                        3'd2: d_alu_op = 5;
-                        3'd3: d_alu_op = 6;
+                        3'd2: d_alu_op = 25;
+                        3'd3: d_alu_op = 26;
                         3'd4: d_alu_op = 4;
                         3'd5: {
                             if r_id_inst[30] {
@@ -880,14 +897,10 @@ pub module Chrysoberyl #(
         if d_zba_shift != 0 {
             d_a = d_a << d_zba_shift;
         }
-        // Branches compare registers but use the instruction PC as their target base.
-        // JALR additionally clears bit 0 as required by the RV32I specification.
-        d_jump_addr = d_a + d_b;
-        if d_branch != 0 {
-            d_jump_addr = d_pc + d_imm;
-        } else if r_id_inst[6:0] == 7'b1100111 {
-            d_jump_addr[0] = 0;
-        }
+        // Branch ALU operands hold the compared registers, so retain a
+        // separately registered PC-relative target. Jumps reuse the execute
+        // arithmetic result and do not need a decode-stage target adder.
+        d_jump_addr = d_pc + d_imm;
         w_load_stall = r_ex_valid && r_ex_mem_read && r_ex_rd != 0
             && ((d_uses_rs1 && d_rs1 == r_ex_rd) || (d_uses_rs2 && d_rs2 == r_ex_rd));
     }
