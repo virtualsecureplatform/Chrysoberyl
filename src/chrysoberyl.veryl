@@ -87,6 +87,7 @@ pub module Chrysoberyl #(
     var d_jump_addr   : logic<32>;
 
     var w_ex_alu      : logic<32>;
+    var w_ex_add_sub  : logic<32>;
     var w_ex_branch_ok: logic    ;
     var w_ex_control  : logic    ;
     var w_ex_taken    : logic    ;
@@ -148,6 +149,74 @@ pub module Chrysoberyl #(
         if bits[5] { ret = 2; }
         if bits[6] { ret = 1; }
         if bits[7] { ret = 0; }
+        return ret;
+    }
+
+    /// Shared 32-bit Kogge-Stone add/subtract datapath. Subtraction uses
+    /// a + ~b + 1, so ADD and SUB share every prefix stage instead of
+    /// synthesizing independent arithmetic networks.
+    function add_sub_prefix (
+        a       : input logic<32>,
+        b       : input logic<32>,
+        subtract: input logic,
+    ) -> logic<32> {
+        var b_effective: logic<32>;
+        var bit_p      : logic<32>;
+        var g0         : logic<32>;
+        var p1         : logic<32>;
+        var g1         : logic<32>;
+        var p2         : logic<32>;
+        var g2         : logic<32>;
+        var p4         : logic<32>;
+        var g4         : logic<32>;
+        var prop8      : logic<32>;
+        var gen8       : logic<32>;
+        var gen16      : logic<32>;
+        var ret        : logic<32>;
+
+        b_effective = b ^ {subtract repeat 32};
+        bit_p = a ^ b_effective;
+        g0 = a & b_effective;
+        // Seed the prefix tree with the +1 required by two's-complement SUB.
+        g0[0] = g0[0] | (bit_p[0] & subtract);
+
+        p1 = bit_p;
+        g1 = g0;
+        for i in 1..32 {
+            p1[i] = bit_p[i] & bit_p[i - 1];
+            g1[i] = g0[i] | (bit_p[i] & g0[i - 1]);
+        }
+
+        p2 = p1;
+        g2 = g1;
+        for i in 2..32 {
+            p2[i] = p1[i] & p1[i - 2];
+            g2[i] = g1[i] | (p1[i] & g1[i - 2]);
+        }
+
+        p4 = p2;
+        g4 = g2;
+        for i in 4..32 {
+            p4[i] = p2[i] & p2[i - 4];
+            g4[i] = g2[i] | (p2[i] & g2[i - 4]);
+        }
+
+        prop8 = p4;
+        gen8 = g4;
+        for i in 8..32 {
+            prop8[i] = p4[i] & p4[i - 8];
+            gen8[i] = g4[i] | (p4[i] & g4[i - 8]);
+        }
+
+        gen16 = gen8;
+        for i in 16..32 {
+            gen16[i] = gen8[i] | (prop8[i] & gen8[i - 16]);
+        }
+
+        ret[0] = bit_p[0] ^ subtract;
+        for i in 1..32 {
+            ret[i] = bit_p[i] ^ gen16[i - 1];
+        }
         return ret;
     }
 
@@ -250,8 +319,13 @@ pub module Chrysoberyl #(
         if r_ex_a[31:24] != 0 { w_orc_b[31:24] = 8'hff; }
 
         // Execute stage. Operations 11 through 27 implement RV32 Zbb.
+        w_ex_add_sub = add_sub_prefix(
+            r_ex_a,
+            r_ex_b,
+            r_ex_alu_op == 5'd1,
+        );
         case r_ex_alu_op {
-            5'd1: w_ex_alu = r_ex_a - r_ex_b;
+            5'd1: w_ex_alu = w_ex_add_sub;
             5'd2: w_ex_alu = r_ex_a & r_ex_b;
             5'd3: w_ex_alu = r_ex_a | r_ex_b;
             5'd4: w_ex_alu = r_ex_a ^ r_ex_b;
@@ -314,7 +388,7 @@ pub module Chrysoberyl #(
             5'd25: w_ex_alu = (r_ex_a >> r_ex_b[4:0]) | (r_ex_a << (5'd0 - r_ex_b[4:0]));
             5'd26: w_ex_alu = w_orc_b;
             5'd27: w_ex_alu = {r_ex_a[7:0], r_ex_a[15:8], r_ex_a[23:16], r_ex_a[31:24]};
-            default: w_ex_alu = r_ex_a + r_ex_b;
+            default: w_ex_alu = w_ex_add_sub;
         }
         w_ex_branch_ok = false;
         case r_ex_branch {
