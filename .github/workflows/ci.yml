@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: RTL and ISA tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out source and ISA tests
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Install simulation toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes clang iverilog lld verilator
+
+      - name: Install latest Veryl
+        run: |
+          rustup update stable
+          cargo install veryl --locked
+
+      - name: Check Veryl sources
+        run: veryl check
+
+      - name: Run directed RTL tests
+        run: sh test/run_smoke.sh
+
+      - name: Run upstream RISC-V ISA tests
+        run: sh test/run_riscv_tests.sh
